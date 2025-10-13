@@ -8,6 +8,7 @@ from tokenizers import Tokenizer
 from fourm.utils.plotting_utils import decode_text
 import cv2
 import random
+from fourm.demo_4M_sampler import img_from_url
 
 def load_video_frame(video_path, video_part=None, device='cuda'):
     cap = cv2.VideoCapture(video_path)
@@ -69,14 +70,24 @@ def main(config_path: str):
         )
     print(schedule)
     
-    image_tensor = load_video_frame("/Users/konradgoldenbaum/Downloads/valid/action_5/clip_1.mp4",0.25, device)
-    image_tensor2 = load_video_frame("/Users/konradgoldenbaum/Downloads/valid/action_5/clip_1.mp4",0.75, device)
-    image_tensor3 = load_video_frame("/Users/konradgoldenbaum/Downloads/valid/action_5/clip_1.mp4",0.25, device)
-    image_tensor4 = load_video_frame("/Users/konradgoldenbaum/Downloads/valid/action_5/clip_1.mp4",0.75, device)
+    #image_tensor = load_video_frame("/Users/konradgoldenbaum/Downloads/valid/action_5/clip_1.mp4",0.25, device)
+    #image_tensor2 = load_video_frame("/Users/konradgoldenbaum/Downloads/valid/action_5/clip_1.mp4",0.75, device)
+    #image_tensor3 = load_video_frame("/Users/konradgoldenbaum/Downloads/valid/action_5/clip_1.mp4",0.25, device)
+    #image_tensor4 = load_video_frame("/Users/konradgoldenbaum/Downloads/valid/action_5/clip_1.mp4",0.75, device)
 
     #image_tensor11 = torch.cat([image_tensor1, image_tensor2], dim=3)
     #image_tensor12 = torch.cat([image_tensor3, image_tensor4], dim=3)
     #image_tensor = torch.cat([image_tensor11, image_tensor12], dim=2)
+
+    image_tensor = img_from_url('https://storage.googleapis.com/four_m_site/images/demo_rgb.png')
+
+    transform = T.Compose([
+        T.Resize((224, 224)),
+        T.ToTensor(),
+        T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+    ])
+    
+    image_tensor = transform(image_tensor).unsqueeze(0).view(1, 3, 224, 224).to(device)
 
     model = load_model(model_id=args.model, model_class=FM, device= device)
     sampler = GenerationSampler(
@@ -105,7 +116,7 @@ def main(config_path: str):
 
     mod_dict['sam_instance']['tensor'][:,:2] = 5
     mod_dict['caption']['tensor'][:,:2] = 5
-    text_tokenizer = Tokenizer.from_file("/Volumes/KG1TB/Developement/master/master_exp/ml-4m/fourm/utils/tokenizer/trained/text_tokenizer_4m_wordpiece_30k.json")
+    text_tokenizer = Tokenizer.from_file("./ml-4m/fourm/utils/tokenizer/trained/text_tokenizer_4m_wordpiece_30k.json")
     
     result = sampler.generate(
         mod_dict=mod_dict,
