@@ -81,13 +81,7 @@ def main(config_path: str):
 
     image_tensor = img_from_url('https://storage.googleapis.com/four_m_site/images/demo_rgb.png')
 
-    transform = T.Compose([
-        T.Resize((224, 224)),
-        T.ToTensor(),
-        T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-    ])
-
-    image_tensor = transform(image_tensor).unsqueeze(0).view(1, 3, 224, 224).to(device)
+    image_tensor = image_tensor.to(device)
 
     model = load_model(model_id=args.model, model_class=FM, device= device)
     sampler = GenerationSampler(
@@ -116,7 +110,7 @@ def main(config_path: str):
 
     mod_dict['sam_instance']['tensor'][:,:2] = 5
     mod_dict['caption']['tensor'][:,:2] = 5
-    text_tokenizer = Tokenizer.from_file("./ml-4m/fourm/utils/tokenizer/trained/text_tokenizer_4m_wordpiece_30k.json")
+    text_tokenizer = Tokenizer.from_file("./fourm/utils/tokenizer/trained/text_tokenizer_4m_wordpiece_30k.json")
     
     result = sampler.generate(
         mod_dict=mod_dict,
@@ -129,5 +123,5 @@ def main(config_path: str):
     print(decoded)
 
 
-main("./ml-4m/cfgs/default/generation/models/4m-b_mod21+sr_4m-l_mod7.yaml")
+main("./cfgs/default/generation/models/4m-b_mod21+sr_4m-l_mod7.yaml")
 
