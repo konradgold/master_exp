@@ -86,7 +86,7 @@ def main(config_path: str):
         T.ToTensor(),
         T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
     ])
-    
+
     image_tensor = transform(image_tensor).unsqueeze(0).view(1, 3, 224, 224).to(device)
 
     model = load_model(model_id=args.model, model_class=FM, device= device)
@@ -129,5 +129,5 @@ def main(config_path: str):
     print(decoded)
 
 
-main("/Volumes/KG1TB/Developement/master/master_exp/ml-4m/cfgs/default/generation/models/4m-b_mod21+sr_4m-l_mod7.yaml")
+main("./ml-4m/cfgs/default/generation/models/4m-b_mod21+sr_4m-l_mod7.yaml")
 
