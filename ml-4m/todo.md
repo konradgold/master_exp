@@ -1,5 +1,5 @@
 # Setting up M4 baselines
-- [ ] Research: How is 4M evaluated?
+- [x] Research: How is 4M evaluated?
 - [ ] Decide: 4M baseline evaluation, that is reasonable to replicate
 - [ ] Implement, compatible to HPC
 
