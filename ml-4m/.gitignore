@@ -11,3 +11,5 @@ wandb/
 tokenizer_ckpts/
 *pkl
 *.egg-info
+outputs/*
+*.safetensors

@@ -15,6 +15,7 @@ cfg_grow_conditioning: true        # can be explicitly set false via CLI
 top_p: 0.0
 top_k: 0.0
 backbone: "EPFL-VILAB/4M-21_B"
+checkpoint_path: "checkpoints/"
 
 # Super resolution parameters
 sr_cond_domains: null
