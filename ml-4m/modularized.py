@@ -1,3 +1,4 @@
+from tabnanny import check
 import hydra
 from regex import P
 from fourm.models.fm import FM
@@ -7,10 +8,10 @@ from safetensors.torch import load_file
 
 from fourm.utils.checkpoint import load_safetensors
 
-def validate_config(cfg, checkpoint_config):
+def align_config(cfg, checkpoint_config):
     # Implement your validation logic here
     # For example, compare cfg and checkpoint_config attributes
-    return True
+    return checkpoint_config
 
 @hydra.main(version_base=None, config_path="cfgs", config_name="default_run")
 def main(cfg):
@@ -36,8 +37,8 @@ def main(cfg):
         )
     # Load the checkpoint
     state_dict, config = load_safetensors(str(filename))
-    if validate_config(cfg, config):
-        model = FM(config)
-        model.load_state_dict(state_dict)
+    config = align_config(cfg, config)
+    model = FM(config)
+    model.load_state_dict(state_dict)
 
 main()
