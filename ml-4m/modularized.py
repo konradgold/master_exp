@@ -11,6 +11,8 @@ from fourm.utils.checkpoint import load_safetensors
 def align_config(cfg, checkpoint_config):
     # Implement your validation logic here
     # For example, compare cfg and checkpoint_config attributes
+    checkpoint_config['domains_in'] = cfg.domains_in
+    checkpoint_config['domains_out'] = cfg.domains_out
     return checkpoint_config
 
 @hydra.main(version_base=None, config_path="cfgs", config_name="default_run")

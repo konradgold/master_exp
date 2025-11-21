@@ -17,6 +17,9 @@ top_k: 0.0
 backbone: "EPFL-VILAB/4M-21_B"
 checkpoint_path: "checkpoints/"
 
+domains_in: ['human_poses', 'caption', 'sam_instance', 'rgb@224']
+domains_out: ['caption', 'color_palette', 'sam_instance', 'rgb@224']
+
 # Super resolution parameters
 sr_cond_domains: null
 sr_target_domains: 'tok_clip@448-tok_rgb@448'
