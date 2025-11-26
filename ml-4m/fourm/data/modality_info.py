@@ -26,7 +26,7 @@ from fourm.models.decoder_embeddings import (ImageTokenDecoderEmbedding,
 from fourm.models.encoder_embeddings import (ImageEncoderEmbedding,
                                    ImageTokenEncoderEmbedding,
                                    SequenceEncoderEmbedding,
-                                   SequenceEmbEncoderEmbedding)
+                                   SequenceEmbEncoderEmbedding, VideoEncoderEmbedding)
 from fourm.utils import generate_uint15_hash
 
 MODALITY_INFO = {
@@ -42,6 +42,18 @@ MODALITY_INFO = {
         'num_channels': 3,
         'id': generate_uint15_hash('rgb@224'),
         'path': 'rgb',
+    },
+    'video@224': {
+        'input_size': 224,
+        'patch_size': 16,
+        'encoder_embedding': partial(VideoEncoderEmbedding, num_channels=4),
+        'decoder_embedding': None,
+        'min_tokens': 0,
+        'max_tokens': None, # Will be set to 196*num_frames
+        'type': 'img',
+        'num_channels': 4,
+        'id': generate_uint15_hash('video@224'),
+        'path': 'video',
     },
     'rgb': { # used for tokenizer training
         'type': 'img',

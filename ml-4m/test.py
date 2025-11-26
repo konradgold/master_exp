@@ -53,7 +53,7 @@ def load_image(path, device):
 def main(config_path: str):
     args = get_args(['-c', config_path])
     print(args.model)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     schedule = build_chained_generation_schedules(
             cond_domains= ['rgb@224'],
@@ -83,7 +83,7 @@ def main(config_path: str):
 
     image_tensor = image_tensor.to(device)
 
-    model = load_model(model_id=args.model, model_class=FM, device= device)
+    model = load_model(model_id=args.model, model_class=FM, device=device)
     sampler = GenerationSampler(
         model
     )

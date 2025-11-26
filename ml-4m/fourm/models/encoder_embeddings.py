@@ -210,6 +210,9 @@ class ImageTokenEncoderEmbedding(nn.Module):
 
         return d
 
+class VideoEncoderEmbedding(nn.Module):
+    pass
+
 
 class ImageEncoderEmbedding(nn.Module):
     """Embedding module for spatial inputs, like images or feature maps.
