@@ -4,7 +4,7 @@
 - [ ] Implement, compatible to HPC
 
 # Foul Recognition Challenge
-- [ ] Decide on useful output format (head on language tokens,...)
+- [x] Decide on useful output format (head on language tokens,...)
 - [ ] Implement baseline: Aggregation
 - [ ] Implement adaptation of 4M pretrained for changed input
 

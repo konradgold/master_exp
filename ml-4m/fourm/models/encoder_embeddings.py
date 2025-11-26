@@ -212,6 +212,8 @@ class ImageTokenEncoderEmbedding(nn.Module):
 
 class VideoEncoderEmbedding(nn.Module):
     pass
+# TODO: implement video embedding
+# TODO: adapt design of ImageTokenEncoderEmbedding -> tokenize using the image tokenizer, then select tokens, then embed.
 
 
 class ImageEncoderEmbedding(nn.Module):

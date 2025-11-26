@@ -1374,7 +1374,7 @@ def eval_metrics(model: Union[nn.Module, DDP],
             reconst = denormalize(output[:,:3], mean=(0.5,0.5,0.5), std=(0.5,0.5,0.5))
         elif domain in ['depth']:
             # 1-channel per-sample standardized domains
-            # TODO: Perform robust per-sample standardization to evaluate shift and scale invariant metrics
+            # todo: Perform robust per-sample standardization to evaluate shift and scale invariant metrics
             gt = clean_images[:,:1]
             reconst = output[:,:1]
         elif domain in ['edge_occlusion', 'edge_texture', 'keypoints2d', 'keypoints3d', 'reshading']:

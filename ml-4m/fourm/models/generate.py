@@ -923,7 +923,7 @@ class GenerationSampler(nn.Module):
          ### 1 - Encoder forward pass, with conditioning
         
         # Encoder
-        encoder_mod_dict = {mod: self.model.encoder_embeddings[mod](d)
+        encoder_mod_dict = {mod: self.model.encoder_embeddings[mod](d) # Todo: implement this encoder embedding model
                             for mod, d in mod_dict.items()
                             if mod in self.model.encoder_embeddings}
         encoder_tokens, encoder_emb, encoder_mask_cond, encoder_mod_mask = self.forward_mask_encoder_generation(encoder_mod_dict)

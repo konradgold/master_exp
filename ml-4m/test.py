@@ -69,15 +69,6 @@ def main(config_path: str):
             cfg_grow_conditioning=True,
         )
     print(schedule)
-    
-    #image_tensor = load_video_frame("/Users/konradgoldenbaum/Downloads/valid/action_5/clip_1.mp4",0.25, device)
-    #image_tensor2 = load_video_frame("/Users/konradgoldenbaum/Downloads/valid/action_5/clip_1.mp4",0.75, device)
-    #image_tensor3 = load_video_frame("/Users/konradgoldenbaum/Downloads/valid/action_5/clip_1.mp4",0.25, device)
-    #image_tensor4 = load_video_frame("/Users/konradgoldenbaum/Downloads/valid/action_5/clip_1.mp4",0.75, device)
-
-    #image_tensor11 = torch.cat([image_tensor1, image_tensor2], dim=3)
-    #image_tensor12 = torch.cat([image_tensor3, image_tensor4], dim=3)
-    #image_tensor = torch.cat([image_tensor11, image_tensor12], dim=2)
 
     image_tensor = img_from_url('https://storage.googleapis.com/four_m_site/images/demo_rgb.png')
 

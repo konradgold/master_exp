@@ -21,6 +21,9 @@ from einops import repeat
 from .fm_utils import build_1d_sincos_posemb, build_2d_sincos_posemb, pair
 
 
+# TODO: add foul decoder here?
+
+
 class SequenceDecoderEmbedding(nn.Module):
     """Embedding module for sequence inputs, like captions or a sequence of objects.
 

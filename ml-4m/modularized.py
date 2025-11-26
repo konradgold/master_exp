@@ -41,6 +41,9 @@ def main(cfg):
     state_dict, config = load_safetensors(str(filename))
     config = align_config(cfg, config)
     model = FM(config)
-    model.load_state_dict(state_dict)
+    model.load_state_dict(state_dict, strict=False)
+    print("model loaded successfully")
+
+    
 
 main()

@@ -26,6 +26,8 @@ from .encoder_embeddings import ImageEncoderEmbedding
 from .fm_utils import Block, LayerNorm
 from fourm.data.modality_info import MODALITY_INFO
 
+# TODO: Get inspired: use this classifier head for Foul recognition?
+
 
 __all__ = [
     # GELU models
