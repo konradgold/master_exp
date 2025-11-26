@@ -1,0 +1,105 @@
+run_name: 'auto'
+
+# Generation parameters
+cond_domains: 'caption-det'
+target_domains: 'tok_clip-tok_normal-tok_rgb'
+tokens_per_target: '196-196-196'
+autoregression_schemes: 'maskgit-maskgit-maskgit'
+decoding_steps: '25-25-25'
+token_decoding_schedules: 'cosine-cosine-cosine'
+temps: '5.0-1.0-1.0'
+temp_schedules: 'linear-linear-linear'
+cfg_scales: '4.0-4.0-4.0'
+cfg_schedules: 'constant-constant-constant'
+cfg_grow_conditioning: true        # can be explicitly set false via CLI
+top_p: 0.0
+top_k: 0.0
+backbone: "EPFL-VILAB/4M-21_B"
+checkpoint_path: "checkpoints/"
+
+domains_in: ['human_poses', 'caption', 'sam_instance', 'rgb@224']
+domains_out: ['caption', 'color_palette', 'sam_instance', 'rgb@224']
+
+# Super resolution parameters
+sr_cond_domains: null
+sr_target_domains: 'tok_clip@448-tok_rgb@448'
+sr_tokens_per_target: '784'
+sr_autoregression_schemes: 'maskgit'
+sr_decoding_steps: '8'
+sr_token_decoding_schedules: 'cosine'
+sr_temps: '1.0'
+sr_temp_schedules: 'linear'
+sr_cfg_scales: '4.0'
+sr_cfg_schedules: 'constant'
+sr_cfg_grow_conditioning: true     # can be explicitly set false via CLI
+sr_top_p: 0.0
+sr_top_k: 0.0
+
+# Script parameters
+num_samples: null
+num_variations: 1
+seed: 0
+
+# Tokenizer settings
+detokenizer_steps: 25
+rgb_tok_id: null
+depth_tok_id: null
+normal_tok_id: null
+edges_tok_id: null
+semseg_tok_id: null
+clip_tok_id: null
+dinov2_tok_id: null
+imagebind_tok_id: null
+dinov2_glob_tok_id: null
+imagebind_glob_tok_id: null
+sam_instance_tok_id: null
+human_poses_tok_id: null
+text_tok_path: 'fourm/utils/tokenizer/trained/text_tokenizer_4m_wordpiece_30k.json'
+
+# ControlNet parameters
+activate_controlnet: false        # can be set true via CLI
+controlnet_id: null
+controlnet_guidance_scale: 2.5
+controlnet_cond_scale: 0.8
+
+# Model parameters
+model: null
+sr_model: null
+image_size: 224
+patch_size: 16
+dtype: 'float32'                  # Choices: ['float16', 'bfloat16', 'float32', 'bf16', 'fp16', 'fp32']
+
+# Data
+data_path: '/mnt/datasets/cc12_multitask_224/val'
+data_name: ''
+num_workers: 1
+pin_mem: true                     # can be set false via CLI
+parti_prompts_t5_embs: null
+
+# Misc
+s3_endpoint: ''
+s3_path: ''
+image_size_metrics: 256
+name: ''
+sr_name: ''
+output_dir: ''
+num_log_images: 100
+save_all_outputs: false           # can be set true via CLI
+
+# Wandb logging
+log_wandb: false                  # can be set true via CLI
+wandb_project: null
+wandb_entity: null
+wandb_run_name: null
+wandb_mode: 'online'
+show_user_warnings: false         # can be set true via CLI
+
+# GPU / Distributed parameters
+device: 'cuda'
+dist_gen: true                    # can be set false via CLI
+world_size: 1
+local_rank: -1
+dist_on_itp: false
+dist_url: 'env://'
+
+# Config paths populated after initial config load

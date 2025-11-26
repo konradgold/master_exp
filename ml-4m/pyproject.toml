@@ -39,6 +39,7 @@ dependencies = [
     "smplx>=0.1.28",
     "yacs>=0.1.8",
     "soccernet>=0.1.62",
+    "hydra-core>=1.3.2",
 ]
 
 [project.optional-dependencies]
