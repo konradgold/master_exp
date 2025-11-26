@@ -38,6 +38,7 @@ dependencies = [
     "ipykernel>=6.30.1",
     "smplx>=0.1.28",
     "yacs>=0.1.8",
+    "soccernet>=0.1.62",
 ]
 
 [project.optional-dependencies]
