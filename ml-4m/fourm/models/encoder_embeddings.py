@@ -297,13 +297,6 @@ class ImageEncoderEmbedding(nn.Module):
         """
 
         x = d['tensor']
-        if isinstance(x, list):
-            x = torch.stack(x, dim=0)
-            video = True
-        else:
-            video = False
-
-        print(f"Video: {video}")
 
         B, C, H, W = x.shape
         assert self.dim_tokens is not None, 'Need to call init(dim_tokens) function first'
@@ -312,21 +305,9 @@ class ImageEncoderEmbedding(nn.Module):
         # Create patches [B, C, H, W] -> [B, (H*W), C]
         x_patch = self.proj(rearrange(x, 'b d (nh ph) (nw pw) -> b (nh nw) (ph pw d)', ph=self.patch_size[0], pw=self.patch_size[1]))
 
-        if video:
-            B,N,D = x_patch.shape
-            patch = x_patch[0]
-            chunks = N//B
-            if chunks*B<N:
-                j=1
-            else:
-                j=0
-            for i in range(j, B):
-                patch[i*chunks:(i+1)*chunks] = x_patch[i,i*chunks:(i+1)*chunks]
-            x_patch = patch
-
 
         # Create positional embedding + modality embedding
-        x_emb = repeat(self.pos_emb + self.mod_emb, '() n d -> b n d', b=B if not video else 1)
+        x_emb = repeat(self.pos_emb + self.mod_emb, '() n d -> b n d', b=B)
 
         d['x'] = x_patch
         d['emb'] = x_emb
