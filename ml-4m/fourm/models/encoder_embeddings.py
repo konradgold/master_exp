@@ -18,7 +18,7 @@ import torch
 import torch.nn as nn
 from einops import rearrange, repeat
 
-from .fm_utils import PositionalEncodingRegistry, pair
+from .fm_utils import PositionalEncodingRegistry, pair, build_2d_sincos_posemb, build_1d_sincos_posemb
 
 class SequenceEncoderEmbedding(nn.Module):
     """Embedding module for encoding sequence inputs, like captions or a sequence of objects.
