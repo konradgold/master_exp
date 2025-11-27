@@ -20,3 +20,4 @@ from .s3_utils import *
 from .run_name import *
 from .generation_datasets import *
 from .seeds import *
+from .registry import Registry

@@ -13,3 +13,4 @@ tokenizer_ckpts/
 *.egg-info
 outputs/*
 *.safetensors
+macko_spmv

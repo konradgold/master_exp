@@ -11,13 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
+from regex import P
 import torch
 import torch.nn as nn
 from einops import rearrange, repeat
 
-from .fm_utils import build_1d_sincos_posemb, build_2d_sincos_posemb, pair
+from .fm_utils import PositionalEncodingRegistry, pair
 
 class SequenceEncoderEmbedding(nn.Module):
     """Embedding module for encoding sequence inputs, like captions or a sequence of objects.
@@ -48,7 +49,7 @@ class SequenceEncoderEmbedding(nn.Module):
         self.max_sincos_pos_emb = max_sincos_pos_emb
 
         if self.dim_tokens is not None:
-            self.init(dim_tokens=dim_tokens)
+            self.init(dim_tokens=self.dim_tokens)
 
     def init(self, dim_tokens: int = 768, init_std=0.02):
         """
@@ -64,6 +65,7 @@ class SequenceEncoderEmbedding(nn.Module):
         # Task embedding identifying from which task a given token comes from
         # Fixed-size positional embeddings. Can be interpolated to different input sizes
         if self.sincos_pos_emb:
+            build_1d_sincos_posemb: Callable = PositionalEncodingRegistry.get("build_1d_sincos_posemb")
             if self.max_length > self.max_sincos_pos_emb:
                 raise ValueError(f"Max length ({self.max_length}) is greater than the number of posembs ({self.max_sincos_pos_emb}")
             pos_emb = build_1d_sincos_posemb(max_len=self.max_sincos_pos_emb, embed_dim=self.dim_tokens)[:self.max_length]
@@ -144,10 +146,10 @@ class ImageTokenEncoderEmbedding(nn.Module):
         self.dim_tokens = dim_tokens
         self.sincos_pos_emb = sincos_pos_emb
         self.image_size = pair(image_size)
-        self.num_patches = (self.image_size[0] // patch_size) * (self.image_size[1] // patch_size)
+        self.num_patches = (self.image_size[0] // self.patch_size[0]) * (self.image_size[1] // self.patch_size[1])
 
         if self.dim_tokens is not None:
-            self.init(dim_tokens=dim_tokens)
+            self.init(dim_tokens=self.dim_tokens)
 
     def init(self, dim_tokens: int = 768, init_std=0.02):
         """
@@ -165,6 +167,7 @@ class ImageTokenEncoderEmbedding(nn.Module):
         h_posemb = self.image_size[0] // self.patch_size[0]
         w_posemb = self.image_size[1] // self.patch_size[1]
         if self.sincos_pos_emb:
+            build_2d_sincos_posemb: Callable = PositionalEncodingRegistry.get("build_2d_sincos_posemb")
             pos_emb = build_2d_sincos_posemb(h=h_posemb, w=w_posemb, embed_dim=self.dim_tokens)
             self.register_buffer("pos_emb", pos_emb) # self.pos_emb is now a buffer for FSDP
         else:
@@ -211,7 +214,93 @@ class ImageTokenEncoderEmbedding(nn.Module):
         return d
 
 class VideoEncoderEmbedding(nn.Module):
-    pass
+    def __init__(self,
+                 num_channels: int = 3,
+                 patch_size: Union[int, Tuple[int,int]] = 16,
+                 dim_tokens: Optional[int] = None,
+                 pos_emb: str = 'build_2d_sincos_posemb',
+                 image_size: Union[int, Tuple[int]] = 224):
+        super().__init__()
+
+        self.num_channels = num_channels
+        self.patch_size = pair(patch_size)
+        self.dim_tokens = dim_tokens
+        self.emb_generator: Callable = PositionalEncodingRegistry.get(pos_emb)
+        self.image_size = pair(image_size)
+        self.num_patches = (self.image_size[0] // self.patch_size[0]) * (self.image_size[1] // self.patch_size[1])
+        if self.dim_tokens is not None:
+            self.init(dim_tokens=self.dim_tokens)
+
+    def init(self, dim_tokens: int = 768, init_std=0.02):
+        """
+        Initialize parts of encoder that are dependent on dimension of tokens.
+        Should be called when setting up FourM.
+
+        Args:
+            dim_tokens: Dimension of tokens
+            init_std: Standard deviation of init
+        """
+        self.dim_tokens = dim_tokens
+
+        # Task embedding identifying from which task a given token comes from
+        # Fixed-size positional embeddings. Can be interpolated to different input sizes
+        h_posemb = self.image_size[0] // self.patch_size[0]
+        w_posemb = self.image_size[1] // self.patch_size[1]
+        pos_emb = self.emb_generator(h=h_posemb, w=w_posemb, embed_dim=self.dim_tokens)
+        if isinstance(pos_emb, nn.Parameter):
+            self.pos_emb = pos_emb
+            nn.init.normal_(self.pos_emb, std=init_std)
+        else:
+            self.register_buffer("pos_emb", pos_emb) # self.pos_emb is now a buffer for FSDP
+
+        self.mod_emb = nn.Parameter(torch.zeros(1, 1, 1, self.dim_tokens))
+        nn.init.normal_(self.mod_emb, std=init_std)
+
+        # Image -> tokens projection
+        # No bias term here, so modality embedding fully comes from self.mod_emb
+        self.proj = nn.Linear(self.num_channels * self.patch_size[0] * self.patch_size[1], self.dim_tokens, bias=False)
+    
+    @torch.jit.ignore
+    def no_weight_decay(self):
+        return set()
+    
+
+    def forward(self, d: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """
+        Forward pass through embedding module, transforming image to sequence of tokens.
+        Creates corresponding modality and positional embeddings and adds them to the dict.
+
+        Args:
+            d (Dict[str, torch.Tensor]): Modality dict with at least the following key:
+                - 'tensor' (torch.Tensor): Input image for each batch. Shape (B, C, H, W) where B is the batch size, C is the number of channels, and H, W are height and width of the image.
+
+                
+        Returns:
+            Dict[str, torch.Tensor]: Modality dict with added keys:
+                - 'x' (torch.Tensor): Embedded token sequence. Shape (B, (H / PH) * (W / PW), D), where PH and PW are the patch sizes
+                - 'emb' (torch.Tensor): Sum of positional and modality embeddings for the input sequence. Shape (B, (H / PH) * (W / PW), D)
+        """
+
+        x = d['tensor']
+
+        B, T, C, H, W = x.shape
+        assert self.dim_tokens is not None, 'Need to call init(dim_tokens) function first'
+        assert (H % self.patch_size[0] == 0) and (W % self.patch_size[1] == 0), f'Image sizes {H}x{W} must be divisible by patch sizes {self.patch_size[0]}x{self.patch_size[1]}'
+
+        # Create patches [B, T, C, H, W] -> [B, T, (H*W), C]
+        # TODO: Add filter/aggregation logic here?
+        x_patch = self.proj(rearrange(x, 'b t c (nh ph) (nw pw) -> b t (nh nw) (ph pw c)', ph=self.patch_size[0], pw=self.patch_size[1]))
+
+
+        # Create positional embedding + modality embedding
+        x_emb = repeat(self.pos_emb + self.mod_emb, '() n d -> b n d', b=B)
+
+        d['x'] = x_patch
+        d['emb'] = x_emb
+
+        return d
+
+
 # TODO: implement video embedding
 # TODO: adapt design of ImageTokenEncoderEmbedding -> tokenize using the image tokenizer, then select tokens, then embed.
 

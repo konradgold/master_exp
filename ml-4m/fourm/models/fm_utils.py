@@ -16,19 +16,29 @@
 # https://github.com/huggingface/pytorch-image-models
 # --------------------------------------------------------
 
+import enum
+import struct
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
+from fourm.utils.registry import Registry
 
-def pair(t):
+
+PositionalEncodingRegistry = Registry()
+
+def pair(t) -> tuple[int, int]:
+    assert isinstance(t, (int, tuple)), "Input must be an int or a tuple"
+    assert not (isinstance(t, tuple) and len(t) != 2), "If input is a tuple, it must be of length 2"
+    assert isinstance(t, int) or (isinstance(t, tuple) and all(isinstance(x, int) for x in t)), "All elements must be integers"
     return t if isinstance(t, tuple) else (t, t)
 
 def softmax1(tensor):
     # See https://www.evanmiller.org/attention-is-off-by-one.html
     return F.pad(tensor, (0,1)).softmax(dim=-1)[...,:-1]
 
+@PositionalEncodingRegistry.register()
 def build_1d_sincos_posemb(max_len, embed_dim=1024, temperature=10000.):
     """Sine-cosine positional embeddings from MoCo-v3, adapted back to 1d
 
@@ -43,6 +53,16 @@ def build_1d_sincos_posemb(max_len, embed_dim=1024, temperature=10000.):
     pos_emb = torch.cat([torch.sin(out), torch.cos(out)], dim=1).unsqueeze(0) # Shape (1, N, D)
     return pos_emb
 
+def parametrized_embedding_init(max_len=None, h=None, w=None, embed_dim=1024):
+    if h is not None and w is not None:
+        params = nn.Parameter(torch.zeros(1, (h * w), embed_dim))
+    else:
+        assert max_len is not None
+        params = nn.Parameter(torch.zeros(1, max_len, embed_dim))
+    return params
+    
+
+@PositionalEncodingRegistry.register()
 def build_2d_sincos_posemb(h, w, embed_dim=1024, temperature=10000.0):
     """Sine-cosine positional embeddings as used in MoCo-v3
 
