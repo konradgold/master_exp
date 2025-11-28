@@ -1,9 +1,9 @@
 name: Build and Push ML Container
 on:
   push:
-    branches: [main]
+    branches: [container]
   pull_request:
-    branches: [main]
+    branches: [container]
 jobs:
   build:
     runs-on: ubuntu-latest

@@ -5,7 +5,6 @@ RUN apt-get update && apt-get install -y python3-pip curl && \
 ENV PATH="/root/.local/bin:$PATH"
 WORKDIR /workspace
 COPY pyproject.toml uv.lock* ./
-RUN --mount=type=cache,target=/root/.cache/uv,id=uv-cache uv sync --frozen --no-install-workspace
 COPY . .
 RUN uv sync --frozen
 ENTRYPOINT ["uv", "run", "train.py"]
