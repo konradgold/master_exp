@@ -26,6 +26,7 @@ from .encoder_embeddings import ImageEncoderEmbedding
 from .fm_utils import Block, LayerNorm
 from fourm.data.modality_info import MODALITY_INFO
 
+# TODO: Get inspired: use this classifier head for Foul recognition?
 
 
 __all__ = [
@@ -47,7 +48,32 @@ __all__ = [
     'fm_vit_xlarge_24e_swiglu_qknorm_nobias',
 ]
 
-class FourMViT(nn.Module):
+class FoulHead(nn.Module):
+    def __init__(self, dim, num_classes):
+        super().__init__()
+        self.norm0 = LayerNorm(dim[0], eps=1e-6)
+        self.head0 = nn.Linear(dim[0], num_classes[0])
+        self.norm1 = LayerNorm(dim[1], eps=1e-6)
+        self.head1 = nn.Linear(dim[1], num_classes[1])
+
+
+    def init(self, dim):
+        nn.init.xavier_uniform_(self.head0.weight)
+        nn.init.constant_(self.head0.bias, 0)
+        nn.init.xavier_uniform_(self.head1.weight)
+        nn.init.constant_(self.head1.bias, 0)
+
+    def forward(self, x):
+        # x shape: (B, N, D)
+        x0 = self.norm0(x)
+        x1 = self.norm1(x)
+        x0 = x0.mean(dim=1)  # Global average pooling
+        x1 = x1.mean(dim=1)  # Global average pooling
+        x0 = self.head0(x0)
+        x1 = self.head1(x1)
+        return x0, x1
+
+class FourMFoul(nn.Module):
     """Modified 4M model, adapted to behave as a simple RGB-only ViT.
 
     Args:
@@ -92,7 +118,7 @@ class FourMViT(nn.Module):
         gated_mlp: bool = False, # Make the feedforward gated for e.g. SwiGLU
         qk_norm: bool = False,
         encoder_norm = True,
-        output_head: Optional[nn.Module] = None,
+        output_head: Optional[nn.Module] = FoulHead(dim=[dim, dim], num_classes=[11, 5]),
     ):
         super().__init__()
         self.img_size = img_size
