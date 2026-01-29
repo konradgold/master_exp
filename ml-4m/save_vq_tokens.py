@@ -11,7 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import argparse
+import hydra
+from omegaconf import DictConfig
 import datetime
 import os
 import random
@@ -196,7 +197,13 @@ def get_feature_extractor(args):
     else:
         return None
 
-def main(args):
+@hydra.main(config_path="../conf", config_name="config_save_vq_tokens", version_base=None)
+def main(cfg: DictConfig):
+    # Convert to object for backward compatibility
+    args = type('Args', (), cfg)()  
+    for k, v in cfg.items():
+        setattr(args, k, v)
+    
     utils.init_distributed_mode(args)
     device = torch.device(args.device)
 
@@ -313,90 +320,4 @@ def main(args):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(prog="VQ token saver")
-
-    parser.add_argument(
-        "--tokenizer_id", type=str, default='cc12m/rgb_ViTB-UNetP4_16k_224-448',
-        help="ID of tokenizer to load."
-    )
-    parser.add_argument(
-        "--tokenizers_root", type=str, default='./tokenizer_ckpts',
-        help="Path where tokenizer checkpoints are saved."
-    )
-    parser.add_argument(
-        "--data_root", type=str, default='/path/to/dataset',
-        help="Path to dataset root"
-    )
-    parser.add_argument(
-        "--split", type=str, default='train',
-        help="train or val"
-    )
-    parser.add_argument(
-        "--n_crops", type=int, default='1',
-        help="Number of crops to save. If 1, only a center crop will be saved. \
-             If > 1, first image will be center cropped, the subsequent ones will be randomly cropped."
-    )
-    parser.add_argument(
-        "--min_crop_scale", type=float, default=0.8,
-        help="Minimum crop scale (Only for n_crops > 1)"
-    )
-    parser.add_argument(
-        "--input_size", type=int, default=224,
-        help="Image size"
-    )
-    parser.add_argument(
-        "--task", type=str, default='rgb',
-        help="Task name"
-    )
-    parser.add_argument(
-        "--mask_value", type=float, default=None,
-        help="Optionally set masked-out regions to this value after data augs (default: %(default)s)"
-    )
-    parser.add_argument(
-        "--resample_mode", type=str, default=None,
-        help="PIL resample mode for resizing loaded images. One out of ['bilinear', 'bicubic', 'nearest', None]. (default: %(default)s)"
-    )
-    parser.add_argument(
-        "--corrupt_samples_log", type=str, default=None,
-        help="Path to log file with corrupted samples from find_corrupted_pseudolabels.py. \
-              If provided, only corrupted samples will be re-tokenized."
-    )
-    parser.add_argument(
-        "--verbose", action='store_true', default=False,
-        help="Set to enable progress bar"
-    )
-    parser.add_argument(
-        "--dryrun", action='store_true', default=False,
-        help="Set to do a dry run that creates the tokens and prints the paths without saving them to disk."
-    )
-    parser.add_argument('--device', default='cuda', help='Device to use for tokenization')
-    parser.add_argument('--seed', default=0, type=int, help='Random seed')
-    parser.add_argument(
-        "--folder_suffix", type=str,
-        default='dvae_BUa_224',
-        help="Suffix to add to the folder under which the tokens are saved."
-    )
-    parser.add_argument('--num_workers', default=16, type=int)
-    parser.add_argument('--pin_mem', action='store_true',
-                        help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
-    parser.add_argument('--no_pin_mem', action='store_false', dest='pin_mem',
-                        help='')
-    parser.set_defaults(pin_mem=True)
-    parser.add_argument('--batch_size_dataloader', default=64, type=int,
-                        help='Dataloader batch size (default: %(default)s)')
-    parser.add_argument('--batch_size', default=64, type=int,
-                        help='Batch size per GPU (default: %(default)s)')
-
-    # Distributed parameters
-    parser.add_argument('--world_size', default=1, type=int,
-                        help='number of distributed processes')
-    parser.add_argument('--local_rank', default=-1, type=int)
-    parser.add_argument('--dist_on_itp', action='store_true')
-    parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
-
-    parser.add_argument('--force_load_crop', action='store_true',
-                        help='Make sure to load crops locally, otherwise break the code.')
-
-    args = parser.parse_args()
-    print("Force loading existing crop settings: {}".format(args.force_load_crop))
-    main(args)
+    main()
