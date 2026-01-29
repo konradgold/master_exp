@@ -186,12 +186,12 @@ class SaveVQDataset(Dataset):
 
         return imgs, tokens_path
 
-def get_feature_extractor(args):
-    if args.task == 'CLIP-B16':
+def get_feature_extractor(cfg):
+    if cfg.task == 'CLIP-B16':
         teacher_model, _ = clip.load("ViT-B/16", device='cpu', jit=False)
         teacher_model = teacher_model.visual
         return teacher_model.eval()
-    elif args.task in ['DINOv2-B14', 'DINOv2-B14-global']:
+    elif cfg.task in ['DINOv2-B14', 'DINOv2-B14-global']:
         teacher_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
         return teacher_model.eval()
     else:
@@ -200,36 +200,33 @@ def get_feature_extractor(args):
 @hydra.main(config_path="../conf", config_name="config_save_vq_tokens", version_base=None)
 def main(cfg: DictConfig):
     # Convert to object for backward compatibility
-    args = type('Args', (), cfg)()  
-    for k, v in cfg.items():
-        setattr(args, k, v)
     
-    utils.init_distributed_mode(args)
-    device = torch.device(args.device)
+    utils.init_distributed_mode(cfg)
+    device = torch.device(cfg.device)
 
-    seed = args.seed + utils.get_rank()
+    seed = cfg.seed + utils.get_rank()
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
 
-    model, _ = get_image_tokenizer(args.tokenizer_id, tokenizers_root=args.tokenizers_root, encoder_only=True)
-    feature_extractor = get_feature_extractor(args)
+    model, _ = get_image_tokenizer(cfg.tokenizer_id, tokenizers_root=cfg.tokenizers_root, encoder_only=True)
+    feature_extractor = get_feature_extractor(cfg)
 
     num_tasks = utils.get_world_size()
-    args.num_tasks = num_tasks
+    cfg.num_tasks = num_tasks
     global_rank = utils.get_rank()
     sampler_rank = global_rank
 
-    loader_task = 'rgb' if args.task in FEATURE_TASKS else args.task
-    dataset = SaveVQDataset(root=os.path.join(args.data_root, args.split), crop_settings_dir='crop_settings', 
-                            tokens_dir=f'{args.task}_{args.folder_suffix}', task=loader_task,
-                            min_crop_scale=args.min_crop_scale, n_crops=args.n_crops, 
-                            input_size=args.input_size, mask_value=args.mask_value,
-                            resample_mode=args.resample_mode, corrupt_samples_log=args.corrupt_samples_log, force_load_crop=args.force_load_crop)
+    loader_task = 'rgb' if cfg.task in FEATURE_TASKS else cfg.task
+    dataset = SaveVQDataset(root=os.path.join(cfg.data_root, cfg.split), crop_settings_dir='crop_settings', 
+                            tokens_dir=f'{cfg.task}_{cfg.folder_suffix}', task=loader_task,
+                            min_crop_scale=cfg.min_crop_scale, n_crops=cfg.n_crops, 
+                            input_size=cfg.input_size, mask_value=cfg.mask_value,
+                            resample_mode=cfg.resample_mode, corrupt_samples_log=cfg.corrupt_samples_log, force_load_crop=cfg.force_load_crop)
     
     sampler = torch.utils.data.DistributedSampler(dataset, num_replicas=num_tasks, rank=sampler_rank, shuffle=False)
-    data_loader = torch.utils.data.DataLoader(dataset, sampler=sampler, batch_size=args.batch_size_dataloader,
-                                             num_workers=args.num_workers, drop_last=False)
+    data_loader = torch.utils.data.DataLoader(dataset, sampler=sampler, batch_size=cfg.batch_size_dataloader,
+                                             num_workers=cfg.num_workers, drop_last=False)
 
     model.to(device)
     if feature_extractor is not None:
@@ -238,7 +235,7 @@ def main(cfg: DictConfig):
     print(f"Starting tokenization")
     start_time = time.time()
 
-    if global_rank == 0 and args.verbose and not args.dryrun:
+    if global_rank == 0 and cfg.verbose and not cfg.dryrun:
         pbar = tqdm(total=len(data_loader))
     else:
         pbar = None
@@ -248,7 +245,7 @@ def main(cfg: DictConfig):
         # Filter out already saved images
         imgs_batch_filtered, tokens_paths_filtered = [], []
         for imgs, tokens_path in zip(imgs_batch, tokens_paths):
-            if not os.path.exists(tokens_path) or args.corrupt_samples_log is not None:
+            if not os.path.exists(tokens_path) or cfg.corrupt_samples_log is not None:
                 imgs_batch_filtered.append(imgs)
                 tokens_paths_filtered.append(tokens_path)
         if len(imgs_batch_filtered) == 0:
@@ -260,13 +257,13 @@ def main(cfg: DictConfig):
         
         
         # Merge batch and number of augmentation dimensions
-        if 'semseg' in args.task:
+        if 'semseg' in cfg.task:
             imgs_batch = rearrange(imgs_batch, 'b n h w -> (b n) h w')
         else:
             imgs_batch = rearrange(imgs_batch, 'b n c h w -> (b n) c h w')
         
         # For efficiency, process images with batch size that might be different from loader batch size or num augmentations
-        sub_batches = imgs_batch.split(args.batch_size, dim=0)
+        sub_batches = imgs_batch.split(cfg.batch_size, dim=0)
         
         all_tokens = []
         
@@ -274,18 +271,18 @@ def main(cfg: DictConfig):
             sub_batch = sub_batch.to(device)
             
             with torch.no_grad():
-                if 'CLIP' in args.task:
+                if 'CLIP' in cfg.task:
                     B, C, H, W = sub_batch.shape
                     P_H, P_W = feature_extractor.conv1.kernel_size
                     N_H, N_W = H // P_H, W // P_W
                     sub_batch = feature_extractor(sub_batch, return_final_tokens_no_cls=True)
                     sub_batch = rearrange(sub_batch, 'b (nh nw) d -> b d nh nw', nh=N_H, nw=N_W)
-                if 'DINO' in args.task:
+                if 'DINO' in cfg.task:
                     B, C, H, W = sub_batch.shape
                     P_H, P_W = feature_extractor.patch_embed.proj.kernel_size
                     N_H, N_W = H // P_H, W // P_W
                     sub_batch = feature_extractor(sub_batch, is_training=True)
-                    if 'global' in args.task:
+                    if 'global' in cfg.task:
                         sub_batch = sub_batch['x_norm_clstoken']
                         sub_batch = sub_batch.unsqueeze(2).unsqueeze(2)
                     else:
@@ -301,10 +298,10 @@ def main(cfg: DictConfig):
             all_tokens.append(tokens)
             
         all_tokens = np.concatenate(all_tokens)
-        all_tokens = rearrange(all_tokens, '(b n) d -> b n d', n=args.n_crops)
+        all_tokens = rearrange(all_tokens, '(b n) d -> b n d', n=cfg.n_crops)
         
         for tokens, tokens_path in zip(all_tokens, tokens_paths):
-            if args.dryrun:
+            if cfg.dryrun:
                 print(f'Dryrun: rank {global_rank} -> {tokens_path}')
             else:
                 np.save(tokens_path, tokens)
