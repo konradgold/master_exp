@@ -1,0 +1,8 @@
+text_files: /datasets/imagenet_multitask/metadata/all_captions_BLIP.txt
+save_file: utils/tokenizer/trained/default_tokenizer.json
+vocab_size: 30000
+num_sentinels: 200
+coord_bins: 1000
+object_classes: coco
+lowercase: false
+no_lowercase: true

@@ -13,9 +13,10 @@
 # limitations under the License.
 import sys
 sys.path.insert(0,'..')
-import argparse
 import datetime
 import wandb
+import hydra
+from omegaconf import DictConfig, OmegaConf
 import io
 import json
 import math
@@ -88,377 +89,138 @@ def unwrap_model(model: Union[nn.Module, DDP]) -> nn.Module:
     return model.module if hasattr(model, 'module') else model
 
 
-def setup_modality_info(args: argparse.Namespace) -> Dict[str, dict]:
+def setup_modality_info(cfg: DictConfig) -> Dict[str, dict]:
     """Sets up the modality info dictionary for the given domains."""
-    modality_info = {mod: MODALITY_INFO[mod] for mod in args.all_domains}
+    modality_info = {mod: MODALITY_INFO[mod] for mod in cfg.all_domains}
     return modality_info
 
 
-def get_args() -> argparse.Namespace:
-    """Parses the arguments from the command line."""
-    config_parser = parser = argparse.ArgumentParser(description='Training Config', add_help=False)
-    parser.add_argument('-c', '--config', default='', type=str, metavar='FILE',
-                        help='YAML config file specifying default arguments')
-
-    parser = argparse.ArgumentParser('VQ-VAE training script', add_help=False)
-
-    # Model parameters
-    parser.add_argument('--patch_size', default=16, type=int,
-                        help='Patch size for ViT encoder (default: %(default)s)')
-    parser.add_argument('--input_size_min', default=224, type=int,
-                        help='Minimum image size (default: %(default)s)')
-    parser.add_argument('--input_size_max', default=512, type=int,
-                        help='Maximum image size (default: %(default)s)')
-    parser.add_argument('--resolution_step', default=32, type=int,
-                        help='Interval between different training resolutions (default: %(default)s)')
-    parser.add_argument('--input_size_enc', default=None, type=int,
-                        help='Only used when encoder pos emb are initialized at a certain resolution. (default: %(default)s)')
-    parser.add_argument('--input_size_dec', default=None, type=int,
-                        help='Only used when decoder pos emb are initialized at a certain resolution. (default: %(default)s)')
-    parser.add_argument('--mask_size', default=64, type=int,
-                        help='Mask size when tokenizing SAM instannces in the binary mask representation. (default: %(default)s)')
-    parser.add_argument('--encoder_type', default='vit_s_enc', type=str, metavar='ENC',
-                        help='Name of encoder (default: %(default)s)')
-    parser.add_argument('--decoder_type', default='vit_b_dec', type=str, metavar='DEC',
-                        help='Name of decoder (default: %(default)s)')
-    parser.add_argument('--post_mlp', action='store_true')
-    parser.add_argument('--no_post_mlp', action='store_false', dest='post_mlp')
-    parser.set_defaults(post_mlp=True)
-    parser.add_argument('--encoder_ckpt', default=None, type=str,
-                        help='Optional path to encoder checkpoint (default: %(default)s)')
-    parser.add_argument('--full_ckpt', default=None, type=str,
-                        help='Optional path to encoder + quantizer + decoder checkpoint (default: %(default)s)')   
-    parser.add_argument('--freeze_enc', action='store_true')
-    parser.add_argument('--no_freeze_enc', action='store_false', dest='freeze_enc')
-    parser.set_defaults(freeze_enc=False)
-    parser.add_argument('--out_conv', action='store_true',
-                        help='If True, adds two ConvNeXt blocks after transformer to deal with patch checkerboard artifacts (default: %(default)s)')
-    parser.add_argument('--no_out_conv', action='store_false', dest='out_conv')
-    parser.set_defaults(out_conv=False)
-    parser.add_argument('--loss_fn', default='mse', type=str,
-                        help='Reconstruction loss function (default: %(default)s)')
-    parser.add_argument('--percept_loss_type', default=None, type=str,
-                        help='Perceptual loss function. Not used if loss weight is 0. `lpips` or a timm model ID. (default: %(default)s)')
-    parser.add_argument('--percept_loss_blocks', default='blocks.2-blocks.5-blocks.8-blocks.11', type=str,
-                        help='Feature maps to extract for perceptual loss. Only used for timm perceptual losses. (default: %(default)s)')
-    parser.add_argument('--percept_loss_distance', default='cosine', type=str,
-                        help='Distance metric for computing perceptual losses. Only used for timm perceptual losses. (default: %(default)s)')
-    parser.add_argument('--percept_loss_weight', default=0.0, type=float,
-                        help='Weight for perceptual loss (default: %(default)s)')
-
-    # Quantizer parameters
-    parser.add_argument('--quantizer_type', default='lucid', type=str, metavar='QUANT',
-                        help='Type of quantizer. Either lucid or memcodes (default: %(default)s)')
-    parser.add_argument('--codebook_size', default=8192, 
-                        help="""Size of the VQ code book. For FSQ, this is a string of integers separated by hyphen, 
-                             specifying the number levels for each dimension. (default: %(default)s)""")
-    parser.add_argument('--num_codebooks', default=1, type=int,
-                        help='Number of quantizer codebooks (default: %(default)s)')
-    parser.add_argument('--latent_dim', default=32, type=int,
-                        help='Dimension of the bottleneck. For FSQ, this is set to the number of levels in codebook_size and is ignored. (default: %(default)s)')
-    parser.add_argument('--norm_codes', action='store_true')
-    parser.add_argument('--no_norm_codes', action='store_false', dest='norm_codes')
-    parser.set_defaults(norm_codes=True)
-    parser.add_argument('--norm_latents', action='store_true')
-    parser.add_argument('--no_norm_latents', action='store_false', dest='norm_latents')
-    parser.set_defaults(norm_latents=False)
-    parser.add_argument('--codebook_weight', default=1.0, type=float,
-                        help='Weight of code book loss (default: %(default)s)')
-    parser.add_argument('--quantizer_ema_decay', default=0.8, type=float,
-                        help='Quantizer EMA decay rate (default: %(default)s)')
-    parser.add_argument('--coef_ema_dead_code', default=4.0, type=float,
-                        help='Dead code restart coefficient (default: %(default)s)')
-    parser.add_argument('--code_replacement_policy', default='batch_random', type=str,
-                        help='Method of replacing dead codes. batch_random or linde_buzo_gray. (default: %(default)s)')
-    parser.add_argument('--commitment_weight', default=1.0, type=float,
-                        help='Quantizer commitment weight, aka "beta" (default: %(default)s)')
-    parser.add_argument('--kmeans_init', action='store_true')
-    parser.add_argument('--no_kmeans_init', action='store_false', dest='kmeans_init')
-    parser.set_defaults(kmeans_init=False)   
-
-    # Optimizer parameters
-    parser.add_argument('--batch_size', default=256, type=int,
-                        help='Batch size per GPU (default: %(default)s)')
-    parser.add_argument('--batch_size_eval', default=None, type=int,
-                        help='Batch size per GPU during evaluation (default: %(default)s)')
-    parser.add_argument('--epochs', default=100, type=int,
-                        help='Number of epochs (default: %(default)s)')
-    parser.add_argument('--save_ckpt_freq', default=10, type=int,
-                        help='Checkpoint saving frequency in epochs (default: %(default)s)')
-    parser.add_argument('--opt', default='adamw', type=str, metavar='OPTIMIZER',
-                        help='Optimizer (default: %(default)s)')
-    parser.add_argument('--opt_eps', default=1e-8, type=float, metavar='EPSILON',
-                        help='Optimizer epsilon (default: %(default)s)')
-    parser.add_argument('--opt_betas', default=[0.9, 0.95], type=float, nargs='+', metavar='BETA',
-                        help='Optimizer betas (default: %(default)s)')
-    parser.add_argument('--clip_grad', type=float, default=None, metavar='CLIPNORM',
-                        help='Clip gradient norm (default: %(default)s)')
-    parser.add_argument('--skip_grad', type=float, default=None, metavar='SKIPNORM',
-                        help='Skip update if gradient norm larger than threshold (default: %(default)s)')
-    parser.add_argument('--momentum', type=float, default=0.9, metavar='M',
-                        help='SGD momentum (default: %(default)s)')
-    parser.add_argument('--weight_decay', type=float, default=0.05,
-                        help='Weight decay (default: %(default)s)')
-    parser.add_argument('--weight_decay_end', type=float, default=None, help="""Final value of the
-        weight decay. We use a cosine schedule for WD.  (Set the same value as args.weight_decay to keep weight decay unchanged)""")
-
-    parser.add_argument('--blr', type=float, default=1e-4, metavar='LR',
-                        help='Base learning rate: absolute_lr = base_lr * total_batch_size / 256 (default: %(default)s)')
-    parser.add_argument('--warmup_lr', type=float, default=1e-6, metavar='LR',
-                        help='Warmup learning rate (default: %(default)s)')
-    parser.add_argument('--min_lr', type=float, default=0., metavar='LR',
-                        help='Lower lr bound for cyclic schedulers that hit 0 (default: %(default)s)')
-
-    parser.add_argument('--warmup_epochs', type=int, default=5, metavar='N',
-                        help='Epochs to warmup LR, if scheduler supports (default: %(default)s)')
-    parser.add_argument('--warmup_steps', type=int, default=-1, metavar='N',
-                        help='Epochs to warmup LR, if scheduler supports (default: %(default)s)')
-
-    parser.add_argument('--dtype', type=str, default='float16',
-                        choices=['float16', 'bfloat16', 'float32', 'bf16', 'fp16', 'fp32'],
-                        help='Data type (default: %(default)s')
-    parser.add_argument('--dtype_percept', type=str, default=None,
-                        choices=['float16', 'bfloat16', 'float32', 'bf16', 'fp16', 'fp32'],
-                        help='Data type. If None, it will be the same as dtype. (default: %(default)s')
-
-    parser.add_argument('--model_ema', action='store_true', default=True)
-    parser.add_argument('--model_ema_decay', type=float, default=0.9999, help='')
-    parser.add_argument('--model_ema_force_cpu', action='store_true', default=False, help='')
-    parser.add_argument('--model_ema_update_freq', type=int, default=1, help='')
-
-    # Augmentation parameters
-    parser.add_argument('--hflip', type=float, default=0.5,
-                        help='Probability of horizontal flip (default: %(default)s)')
-
-    # Dataset parameters
-    parser.add_argument('--domain', default='rgb', type=str,
-                        help='Domain/Task name to load (default: %(default)s)')
-    parser.add_argument('--mask_value', default=None, type=float,
-                        help='Optionally set masked-out regions to this value after data augs (default: %(default)s)') 
-    parser.add_argument('--data_path', default=None, type=str, help='dataset path')
-    parser.add_argument('--eval_data_path', default=None, type=str, help='dataset path')
-    parser.add_argument('--imagenet_default_mean_and_std', default=False, action='store_true')
-    parser.add_argument('--standardize_surface_normals', default=False, action='store_true')
-    parser.add_argument('--min_crop_scale', default=0.8, type=float,
-                        help='Minimum crop scale for random data augmentation (default: %(default)s)')
-    parser.add_argument('--cache_datasets', default=False, action='store_true',
-                        help='Cache file paths in data_path/dataloader_cache for faster Dataset initialization (default: %(default)s)')
-    
-    parser.add_argument('--use_wds', action='store_true', help='webdatasets')
-    parser.add_argument('--no_use_wds', action='store_false', dest='use_wds')
-    parser.set_defaults(use_wds=False)
-    parser.add_argument('--s3_endpoint', default='', type=str, help='S3 endpoint URL')
-    parser.add_argument('--s3_data_endpoint', default=None, type=str, 
-                        help='S3 endpoint URL for the data (if different). If set to None, will be set to s3_endpoint')
-    parser.add_argument('--wds_n_repeats', default=1, type=int, help='Number of repeats for webdataset loader to improve efficiency')
-    parser.add_argument('--wds_shuffle_buffer_tar', default=1_000, type=int, help='Webdatasets shuffle buffer after loading tar files')
-    parser.add_argument('--wds_shuffle_buffer_repeat', default=1_000, type=int, help='Webdatasets shuffle buffer after repeating samples')
-    parser.add_argument('--s3_multipart_chunksize_mb', default=512, type=int)
-    parser.add_argument('--s3_multipart_threshold_mb', default=512, type=int)
-    parser.add_argument('--dataset_size', default=None, type=int, help='Needed for DDP when using webdatasets')
-
-    # Eval parameters
-    parser.add_argument('--dist_eval', action='store_true', default=False,
-                        help='Enabling distributed evaluation')
-    parser.add_argument('--no_dist_eval', action='store_false', dest='dist_eval',
-                    help='Disabling distributed evaluation')
-    parser.set_defaults(dist_eval=True)
-
-    parser.add_argument('--step_eval', action='store_true', default=False, help="Evaluate on a step basis")
-    parser.add_argument('--epoch_eval', action='store_false', dest='step_eval', help="Evaluate on an epoch basis")
-    parser.add_argument('--input_size_eval', default="256", type=str,
-                        help='Evaluation is ran at this list of image sizes, split by a hyphen (+ min and max size if they are different) (default: %(default)s)')
-    parser.add_argument('--num_eval_metrics_samples', default=None, type=int,
-                        help='Number of samples to use for computing evaluation metrics (default: %(default)s)')
-    parser.add_argument('--eval_freq', default=1, type=int, help="frequency of evaluation (in iterations or epochs)")
-    parser.add_argument('--eval_metrics_freq', default=1, type=int, help="frequency of evaluation metrics (in iterations or epochs)")
-    parser.add_argument('--eval_image_log_freq', default=5, type=int, help="frequency of evaluation image logging (in iterations)")
-    parser.add_argument('--num_logged_images', default=100, type=int, help="number of images to log")
-    parser.add_argument('--eval_only', action='store_true', default=False)
-    parser.add_argument('--no_inception', action='store_true', default=False, help="Disable Inception metric during eval")
-    parser.add_argument('--log_codebook_usage', action='store_true', help='Log the codebook usage')
-    parser.add_argument('--no_codebook_usage', action='store_false', dest='log_codebook_usage', help='Disable logging of the codebook usage')
-    parser.set_defaults(log_codebook_usage=True)
-
-
-    # Misc.
-    parser.add_argument('--output_dir', default='',
-                        help='Path where to save, empty for no saving')
-    parser.add_argument('--device', default='cuda',
-                        help='Device to use for training / testing')
-
-    parser.add_argument('--seed', default=0, type=int, help='Random seed ')
-    parser.add_argument('--resume', default='', help='resume from checkpoint')
-    parser.add_argument('--auto_resume', action='store_true')
-    parser.add_argument('--no_auto_resume', action='store_false', dest='auto_resume')
-    parser.set_defaults(auto_resume=True)
-
-    parser.add_argument('--start_epoch', default=0, type=int, metavar='N', help='start epoch')
-    parser.add_argument('--num_workers', default=10, type=int)
-    parser.add_argument('--pin_mem', action='store_true',
-                        help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
-    parser.add_argument('--no_pin_mem', action='store_false', dest='pin_mem',
-                        help='')
-    parser.set_defaults(pin_mem=True)
-    parser.add_argument('--find_unused_params', action='store_true')
-    parser.add_argument('--no_find_unused_params', action='store_false', dest='find_unused_params')
-    parser.set_defaults(find_unused_params=False)
-
-    # Wandb logging
-    parser.add_argument('--log_wandb', default=False, action='store_true',
-                        help='Log training and validation metrics to wandb')
-    parser.add_argument('--no_log_wandb', action='store_false', dest='log_wandb')
-    parser.set_defaults(log_wandb=False)
-    parser.add_argument('--wandb_project', default=None, type=str,
-                        help='Project name on wandb')
-    parser.add_argument('--wandb_entity', default=None, type=str,
-                        help='User or team name on wandb')
-    parser.add_argument('--wandb_run_name', default=None, type=str,
-                        help='Run name on wandb')
-    parser.add_argument('--wandb_tags', default='', type=str, help='Extra wandb tags, separated by a double hyphen')
-    parser.add_argument('--show_user_warnings', default=False, action='store_true')
-
-    # Distributed training parameters
-    parser.add_argument('--world_size', default=1, type=int,
-                        help='number of distributed processes')
-    parser.add_argument('--local_rank', default=-1, type=int)
-    parser.add_argument('--dist_on_itp', action='store_true')
-    parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
-
-    # S3 Load & Save
-    parser.add_argument('--s3_path', default='', type=str, help='S3 path to model')
-    parser.add_argument('--s3_save_dir', type=str, default="")
-
-    # Parse config file if there is one
-    args_config, remaining = config_parser.parse_known_args()
-    if args_config.config:
-        with open(args_config.config, 'r') as f:
-            cfg = yaml.safe_load(f)
-            parser.set_defaults(**cfg)
-
-    # The main arg parser parses the rest of the args, the usual
-    # defaults will have been overridden if config file specified.
-    args = parser.parse_args(remaining)
-
-    # Add the config path as a final args if given
-    args.config_path = args_config.config
-
-    return args
-
-
-def get_model(args: argparse.Namespace, device: Union[torch.device, str]) -> VQVAE:
+def get_model(cfg: DictConfig, device: Union[torch.device, str]) -> VQVAE:
     """Creates and returns model from arguments."""
     
     # Compute the dead codebook threshold
-    total_batch_size = args.batch_size * utils.get_world_size()
-    if 'sam_mask' in args.domain:
-        input_size_min = input_size_max = args.mask_size
+    total_batch_size = cfg.batch_size * utils.get_world_size()
+    if 'sam_mask' in cfg.domain:
+        input_size_min = input_size_max = cfg.mask_size
     else:
-        input_size_min = args.input_size_min
-        input_size_max = args.input_size_max
+        input_size_min = cfg.input_size_min
+        input_size_max = cfg.input_size_max
 
     mean_img_size = (input_size_min + input_size_max) // 2
-    tokens_per_image = (mean_img_size // args.patch_size) ** 2
-    codebook_size_int = np.prod([int(d) for d in args.codebook_size.split('-')]) if isinstance(args.codebook_size, str) else args.codebook_size
+    tokens_per_image = (mean_img_size // cfg.patch_size) ** 2
+    codebook_size_int = np.prod([int(d) for d in str(cfg.codebook_size).split('-')]) if isinstance(cfg.codebook_size, str) else cfg.codebook_size
     uniform_token_count_per_batch = total_batch_size * tokens_per_image / codebook_size_int
-    threshold_ema_dead_code = uniform_token_count_per_batch / args.coef_ema_dead_code
+    threshold_ema_dead_code = uniform_token_count_per_batch / cfg.coef_ema_dead_code
     print(f'Computed dead code EMA threshold: {threshold_ema_dead_code:.4f}')
 
-    if args.full_ckpt is not None:
+    if cfg.full_ckpt is not None:
         ignore_keys = ['encoder.pos_emb', 'decoder.pos_emb', 'loss']
-        ckpt = args.full_ckpt
+        ckpt = cfg.full_ckpt
     else:
         ignore_keys = ['decoder', 'loss', 'post_quant_conv', 'post_quant_proj', 'encoder.pos_emb']
-        ckpt = args.encoder_ckpt
+        ckpt = cfg.encoder_ckpt
    
-    n_channels = MODALITY_INFO[args.domain]['num_channels']
-    n_labels = MODALITY_INFO[args.domain].get('num_labels', None)
-    patch_proj = MODALITY_INFO[args.domain]['type'] == 'img'
-    if args.mask_value is not None:
+    n_channels = MODALITY_INFO[cfg.domain]['num_channels']
+    n_labels = MODALITY_INFO[cfg.domain].get('num_labels', None)
+    patch_proj = MODALITY_INFO[cfg.domain]['type'] == 'img'
+    if cfg.mask_value is not None:
         n_channels += 1
 
     model = VQVAE(
         image_size=input_size_max,
-        image_size_enc=args.input_size_enc,
-        image_size_dec=args.input_size_dec,
+        image_size_enc=cfg.input_size_enc,
+        image_size_dec=cfg.input_size_dec,
         n_channels=n_channels,
         n_labels=n_labels,
-        enc_type=args.encoder_type,
-        dec_type=args.decoder_type,
-        post_mlp=args.post_mlp,
+        enc_type=cfg.encoder_type,
+        dec_type=cfg.decoder_type,
+        post_mlp=cfg.post_mlp,
         patch_proj=patch_proj,
-        patch_size=args.patch_size,
-        quant_type=args.quantizer_type,
-        codebook_size=args.codebook_size,
-        num_codebooks=args.num_codebooks,
-        latent_dim=args.latent_dim,
-        norm_codes=args.norm_codes,
-        norm_latents=args.norm_latents,
+        patch_size=cfg.patch_size,
+        quant_type=cfg.quantizer_type,
+        codebook_size=cfg.codebook_size,
+        num_codebooks=cfg.num_codebooks,
+        latent_dim=cfg.latent_dim,
+        norm_codes=cfg.norm_codes,
+        norm_latents=cfg.norm_latents,
         sync_codebook=True,
-        ema_decay=args.quantizer_ema_decay,
+        ema_decay=cfg.quantizer_ema_decay,
         threshold_ema_dead_code=threshold_ema_dead_code,
-        code_replacement_policy=args.code_replacement_policy,
-        commitment_weight=args.commitment_weight,
-        kmeans_init=args.kmeans_init,
+        code_replacement_policy=cfg.code_replacement_policy,
+        commitment_weight=cfg.commitment_weight,
+        kmeans_init=cfg.kmeans_init,
         undo_std=False,
         ckpt_path=ckpt,
         ignore_keys=ignore_keys,
-        freeze_enc=args.freeze_enc,
-        out_conv=args.out_conv,
+        freeze_enc=cfg.freeze_enc,
+        out_conv=cfg.out_conv,
     )
 
     return model.to(device)
 
 
-def get_perceptual_loss(args: argparse.Namespace, device: Union[torch.device, str]) -> Optional[nn.Module]:
+def get_perceptual_loss(cfg: DictConfig, device: Union[torch.device, str]) -> Optional[nn.Module]:
     """Creates and returns perceptual loss from arguments."""
-    if args.percept_loss_weight == 0.0:
+    if cfg.percept_loss_weight == 0.0:
         return None
 
-    if args.percept_loss_type == 'lpips':
+    if cfg.percept_loss_type == 'lpips':
         from fourm.vq.percept_losses.lpips import LPIPS
         percept_loss = LPIPS().to(device)
         percept_loss.percept_transform = lambda x: x # No transform needed for LPIPS. Expects [-1, 1] range
     else:
         from fourm.vq.percept_losses.timm_perceptual_loss import TimmPerceptualLoss
         percept_loss = TimmPerceptualLoss(
-            model_id=args.percept_loss_type, 
-            feature_ids=args.percept_loss_blocks, 
-            feature_loss=args.percept_loss_distance,
+            model_id=cfg.percept_loss_type, 
+            feature_ids=cfg.percept_loss_blocks, 
+            feature_loss=cfg.percept_loss_distance,
         ).to(device)
         # percept_transform is created inside TimmPerceptualLoss
 
     return percept_loss.eval()
 
 
-def get_feature_extractor(args: argparse.Namespace, device: Union[torch.device, str]) -> Optional[nn.Module]:
+def get_feature_extractor(cfg: DictConfig, device: Union[torch.device, str]) -> Optional[nn.Module]:
     """Creates and returns feature extractor from arguments."""
-    if args.domain == 'CLIP-B16':
+    if cfg.domain == 'CLIP-B16':
         teacher_model, _ = clip.load("ViT-B/16", device='cpu', jit=False)
         teacher_model = teacher_model.visual
         return teacher_model.eval().to(device)
-    if args.domain == 'CLIP-L14':
+    if cfg.domain == 'CLIP-L14':
         teacher_model, _ = clip.load("ViT-L/14", device='cpu', jit=False)
         teacher_model = teacher_model.visual
         return teacher_model.eval().to(device)
-    elif args.domain == 'DINOv2-B14' or args.domain == 'DINOv2-B14-global':
+    elif cfg.domain == 'DINOv2-B14' or cfg.domain == 'DINOv2-B14-global':
         teacher_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
         return teacher_model.eval().to(device)
-    elif args.domain == 'DINOv2-G14' or args.domain == 'DINOv2-G14-global':
+    elif cfg.domain == 'DINOv2-G14' or cfg.domain == 'DINOv2-G14-global':
         teacher_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitg14')
         return teacher_model.eval().to(device)
-    elif args.domain == 'DINOv2-G14' or args.domain == 'DINOv2-G14-global':
+    elif cfg.domain == 'DINOv2-G14' or cfg.domain == 'DINOv2-G14-global':
         teacher_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitg14')
         return teacher_model.eval().to(device)
-    elif args.domain == 'ImageBind-H14' or args.domain == 'ImageBind-H14-global':
+    elif cfg.domain == 'ImageBind-H14' or cfg.domain == 'ImageBind-H14-global':
         teacher_model = imagebind_model.imagebind_huge(pretrained=True)
         return teacher_model.eval().to(device)
     else:
         return None
 
 
-def main(args: argparse.Namespace) -> None:
+@hydra.main(version_base=None, config_path="conf", config_name="config_vqvae")
+def main(cfg: DictConfig) -> None:
     """Main function for training and evaluation."""
+    # Convert DictConfig to a mutable object for compatibility with existing utils
+    args = OmegaConf.to_container(cfg, resolve=True)
+    args = OmegaConf.create(args)
+    
+    # Setup run name and S3 args
+    utils.setup_run_name(args)
+    utils.setup_s3_args(args)
+
+    # Create output directory if needed
+    if args.output_dir:
+        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+    
     utils.init_distributed_mode(args)
     device = torch.device(args.device)
 
@@ -674,9 +436,9 @@ def main(args: argparse.Namespace) -> None:
     print(args)
 
 
-    model = get_model(args, device)
-    feature_extractor = get_feature_extractor(args, device)
-    percept_loss_fn = get_perceptual_loss(args, device)
+    model = get_model(cfg, device)
+    feature_extractor = get_feature_extractor(cfg, device)
+    percept_loss_fn = get_perceptual_loss(cfg, device)
 
     if args.model_ema:
         # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
@@ -1774,12 +1536,4 @@ def eval_image_log(model: Union[nn.Module, DDP],
 
 
 if __name__ == '__main__':
-    args = get_args()
-    
-    utils.setup_run_name(args)
-    utils.setup_s3_args(args)
-
-    if args.output_dir:
-        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-
-    main(args)
+    main()
