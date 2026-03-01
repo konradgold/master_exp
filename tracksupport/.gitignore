@@ -1,3 +1,4 @@
 outputs
 wandb
 *.pyc
+*.pt
