@@ -1,0 +1,21 @@
+wandb:
+  enable: true
+  project: "Thesis-Goldenbaum"
+  entity: "konradgoldenbaum-hasso-plattner-institut"
+  run_name: mvfoul_scratch_run
+  log_frequency: 50  # log every N iterations
+
+data_path: /sc/home/konrad.goldenbaum/data/SoccerData/mvfouls
+
+epochs: 50
+train_batch_size: 2
+val_batch_size: 1
+lr: 1e-4
+weight_decay: 1e-2
+num_views: 2
+start_frame: 0.0
+end_frame: 4.0
+fps: 25
+num_workers: 4
+grad_accum_steps: 1
+label_smoothing: 0.1
