@@ -13,8 +13,7 @@
 # limitations under the License.
 import sys
 sys.path.insert(0,'..')
-import hydra
-from omegaconf import DictConfig, OmegaConf
+import argparse
 import datetime
 import wandb
 from wandb import AlertLevel
@@ -78,9 +77,9 @@ def unwrap_model(model: Union[nn.Module, DDP]) -> nn.Module:
     return model.module if hasattr(model, 'module') else model
 
 
-def setup_modality_info(cfg: DictConfig) -> Dict[str, dict]:
+def setup_modality_info(args: argparse.Namespace) -> Dict[str, dict]:
     """Sets up the modality info dictionary for the given domains."""
-    modality_info = {mod: MODALITY_INFO[mod] for mod in cfg.all_domains}
+    modality_info = {mod: MODALITY_INFO[mod] for mod in args.all_domains}
     return modality_info
 
 
@@ -91,127 +90,394 @@ def get_crop_size(crop_coords: torch.Tensor) -> torch.Tensor:
     return torch.stack([heights, widths], dim=1)
 
 
-# Configuration now handled via Hydra - see conf/config_divae.yaml
+def get_args() -> argparse.Namespace:
+    """Parses the arguments from the command line."""
+    config_parser = parser = argparse.ArgumentParser(description='Training Config', add_help=False)
+    parser.add_argument('-c', '--config', default='', type=str, metavar='FILE',
+                        help='YAML config file specifying default arguments')
+
+    parser = argparse.ArgumentParser('Diffusion VQ-VAE training script', add_help=False)
+
+    # Model parameters
+    parser.add_argument('--patch_size', default=16, type=int,
+                        help='Patch size for ViT encoder (default: %(default)s)')
+    parser.add_argument('--input_size_min', default=224, type=int,
+                        help='Minimum image size (default: %(default)s)')
+    parser.add_argument('--input_size_max', default=512, type=int,
+                        help='Maximum image size (default: %(default)s)')
+    parser.add_argument('--resolution_step', default=32, type=int,
+                        help='Interval between different training resolutions (default: %(default)s)')
+    parser.add_argument('--input_size_enc', default=None, type=int,
+                        help='Only used when frozen encoder pos emb are initialized at a certain resolution. (default: %(default)s)')
+    parser.add_argument('--encoder_type', default='vit_s_enc', type=str, metavar='ENC',
+                        help='Name of encoder (default: %(default)s)')
+    parser.add_argument('--decoder_type', default='unet_cat', type=str, metavar='DEC',
+                        help='Name of decoder (default: %(default)s)')
+    parser.add_argument('--post_mlp', action='store_true')
+    parser.add_argument('--no_post_mlp', action='store_false', dest='post_mlp')
+    parser.set_defaults(post_mlp=True)
+    parser.add_argument('--encoder_ckpt', default=None, type=str,
+                        help='Optional path to encoder checkpoint (default: %(default)s)')
+    parser.add_argument('--full_ckpt', default=None, type=str,
+                        help='Optional path to encoder + quantizer + decoder checkpoint (default: %(default)s)')                 
+    parser.add_argument('--freeze_enc', action='store_true',
+                        help='Freeze encoder and quantizer (default: %(default)s)')
+    parser.add_argument('--no_freeze_enc', action='store_false', dest='freeze_enc')
+    parser.set_defaults(freeze_enc=False)
+    parser.add_argument('--dec_transformer_dropout', default=0.2, type=int,
+                        help='Dropout ratio for the transformer midblock of the UViT decoder (default: %(default)s)')
+    
+    # Quantizer parameters
+    parser.add_argument('--quantizer_type', default='lucid', type=str, metavar='QUANT',
+                        help='Type of quantizer. Either lucid or memcodes (default: %(default)s)')
+    parser.add_argument('--codebook_size', default=8192, 
+                        help="""Size of the VQ code book. For FSQ, this is a string of integers separated by hyphen, 
+                             specifying the number levels for each dimension. (default: %(default)s)""")
+    parser.add_argument('--latent_dim', default=32, type=int,
+                        help='Dimension of the bottleneck. For FSQ, this is set to the number of levels in codebook_size and is ignored. (default: %(default)s)')
+    parser.add_argument('--norm_codes', action='store_true')
+    parser.add_argument('--no_norm_codes', action='store_false', dest='norm_codes')
+    parser.set_defaults(norm_codes=True)
+    parser.add_argument('--norm_latents', action='store_true')
+    parser.add_argument('--no_norm_latents', action='store_false', dest='norm_latents')
+    parser.set_defaults(norm_latents=False)
+    parser.add_argument('--codebook_weight', default=1.0, type=float,
+                        help='Weight of code book loss (default: %(default)s)')
+    parser.add_argument('--quantizer_ema_decay', default=0.8, type=float,
+                        help='Quantizer EMA decay rate (default: %(default)s)')
+    parser.add_argument('--coef_ema_dead_code', default=4.0, type=float,
+                        help='Dead code restart coefficient (default: %(default)s)')
+    parser.add_argument('--code_replacement_policy', default='batch_random', type=str,
+                        help='Method of replacing dead codes. batch_random or linde_buzo_gray. (default: %(default)s)')
+    parser.add_argument('--commitment_weight', default=1.0, type=float,
+                        help='Quantizer commitment weight, aka "beta" (default: %(default)s)')
+    parser.add_argument('--kmeans_init', action='store_true')
+    parser.add_argument('--no_kmeans_init', action='store_false', dest='kmeans_init')
+    parser.set_defaults(kmeans_init=False)           
+
+    # Diffusion parameters
+    parser.add_argument('--num_train_timesteps', default=1000, type=int,
+                        help='Number of diffusion steps during training (default: %(default)s)')
+    parser.add_argument('--prediction_type', default='sample', type=str,
+                        help='sample (x_0), epsilon (noise), v_prediction (velocity), or v_prediction-epsilon_loss diffusion mode (default: %(default)s)')
+    parser.add_argument('--beta_schedule', default='linear', type=str,
+                        help='Forward process beta schedule. linear or squaredcos_cap_v2 (default: %(default)s)')
+    parser.add_argument('--zero_terminal_snr', action='store_true',
+                        help='Enforce SNR of beta schedule to be zero at t=T. (default: %(default)s)')
+    parser.add_argument('--no_zero_terminal_snr', action='store_false', dest='zero_terminal_snr')
+    parser.set_defaults(zero_terminal_snr=True)
+    parser.add_argument('--cls_free_guidance_dropout', default=0.2, type=int,
+                        help='Condition dropout percentage during training for classifier free guidance (default: %(default)s)')
+    parser.add_argument('--masked_cfg', action='store_true',
+                        help='Enable to perform masking on the encoded tokens. (default: %(default)s)')
+    parser.add_argument('--no_masked_cfg', action='store_false', dest='masked_cfg')
+    parser.set_defaults(masked_cfg=True)
+    parser.add_argument('--masked_cfg_low', default=0, type=int,
+                        help='Lower bound of number of tokens to mask out (default: %(default)s)')
+    parser.add_argument('--masked_cfg_high', default=None, type=int,
+                        help='Upper bound of number of tokens to mask out, defaults to total number of tokens minus 1 (default: %(default)s)')
+    parser.add_argument('--thresholding', default=True, type=bool,
+                        help='Whether or not to dynamically clip outputs to [-1,1]. Only affects inference time. (default: %(default)s)')
+    parser.add_argument('--loss_fn', default='mse', type=str,
+                        help='Diffusion noise loss function. mse, l1, or smooth_l1 (default: %(default)s)')
+    parser.add_argument('--conditioning', default='concat', type=str,
+                        help='Method to condition UViT Transformer on tokens. concat or xattn. (default: %(default)s)')
+    parser.add_argument('--resolution_cond', action='store_true',
+                        help='Enable to condition diffusion decoder on original image resolution. (default: %(default)s)')
+    parser.add_argument('--no_resolution_cond', action='store_false', dest='resolution_cond')
+    parser.set_defaults(resolution_cond=False)
+    parser.add_argument('--eval_res_cond', default=512, type=int,
+                        help='"Original" resolution to condition diffusion decoder on during evaluation. (default: %(default)s)')
+
+    # Optimizer parameters
+    parser.add_argument('--batch_size', default=256, type=int,
+                        help='Batch size per GPU (default: %(default)s)')
+    parser.add_argument('--batch_size_eval', default=None, type=int,
+                        help='Batch size per GPU during evaluation (default: %(default)s)')
+    parser.add_argument('--epochs', default=100, type=int,
+                        help='Number of epochs (default: %(default)s)')
+    parser.add_argument('--save_ckpt_freq', default=10, type=int,
+                        help='Checkpoint saving frequency in epochs (default: %(default)s)')
+    parser.add_argument('--opt', default='adamw', type=str, metavar='OPTIMIZER',
+                        help='Optimizer (default: %(default)s)')
+    parser.add_argument('--opt_eps', default=1e-8, type=float, metavar='EPSILON',
+                        help='Optimizer epsilon (default: %(default)s)')
+    parser.add_argument('--opt_betas', default=[0.9, 0.95], type=float, nargs='+', metavar='BETA',
+                        help='Optimizer betas (default: %(default)s)')
+    parser.add_argument('--clip_grad', type=float, default=None, metavar='CLIPNORM',
+                        help='Clip gradient norm (default: %(default)s)')
+    parser.add_argument('--skip_grad', type=float, default=None, metavar='SKIPNORM',
+                        help='Skip update if gradient norm larger than threshold (default: %(default)s)')
+    parser.add_argument('--momentum', type=float, default=0.9, metavar='M',
+                        help='SGD momentum (default: %(default)s)')
+    parser.add_argument('--weight_decay', type=float, default=0.05,
+                        help='Weight decay (default: %(default)s)')
+    parser.add_argument('--weight_decay_end', type=float, default=None, help="""Final value of the
+        weight decay. We use a cosine schedule for WD.  (Set the same value as args.weight_decay to keep weight decay unchanged)""")
+
+    parser.add_argument('--blr', type=float, default=1e-4, metavar='LR',
+                        help='Base learning rate: absolute_lr = base_lr * total_batch_size / 256 (default: %(default)s)')
+    parser.add_argument('--warmup_lr', type=float, default=1e-6, metavar='LR',
+                        help='Warmup learning rate (default: %(default)s)')
+    parser.add_argument('--min_lr', type=float, default=0., metavar='LR',
+                        help='Lower lr bound for cyclic schedulers that hit 0 (default: %(default)s)')
+
+    parser.add_argument('--warmup_epochs', type=int, default=40, metavar='N',
+                        help='Epochs to warmup LR, if scheduler supports (default: %(default)s)')
+    parser.add_argument('--warmup_steps', type=int, default=-1, metavar='N',
+                        help='Epochs to warmup LR, if scheduler supports (default: %(default)s)')
+
+    parser.add_argument('--dtype', type=str, default='float16',
+                        choices=['float16', 'bfloat16', 'float32', 'bf16', 'fp16', 'fp32'],
+                        help='Data type (default: %(default)s')
+
+    parser.add_argument('--model_ema', action='store_true', default=True)
+    parser.add_argument('--model_ema_decay', type=float, default=0.9999, help='')
+    parser.add_argument('--model_ema_force_cpu', action='store_true', default=False, help='')
+    parser.add_argument('--model_ema_update_freq', type=int, default=1, help='')
+
+    # Augmentation parameters
+    parser.add_argument('--hflip', type=float, default=0.5,
+                        help='Probability of horizontal flip (default: %(default)s)')
+
+    # Dataset parameters
+    parser.add_argument('--domain', default='rgb', type=str,
+                        help='Domain/Task name to load (default: %(default)s)')
+    parser.add_argument('--mask_value', default=None, type=float,
+                        help='Optionally set masked-out regions to this value after data augs (default: %(default)s)') 
+    parser.add_argument('--data_path', default=None, type=str, help='dataset path')
+    parser.add_argument('--eval_data_path', default=None, type=str, help='dataset path')
+    parser.add_argument('--imagenet_default_mean_and_std', default=False, action='store_true')
+    parser.add_argument('--standardize_surface_normals', default=False, action='store_true')
+    parser.add_argument('--min_crop_scale', default=0.8, type=float,
+                        help='Minimum crop scale for random data augmentation (default: %(default)s)')
+    parser.add_argument('--cache_datasets', default=False, action='store_true',
+                        help='Cache file paths in data_path/dataloader_cache for faster Dataset initialization (default: %(default)s)')
+    
+    parser.add_argument('--use_wds', action='store_true', help='webdatasets')
+    parser.add_argument('--no_use_wds', action='store_false', dest='use_wds')
+    parser.set_defaults(use_wds=False)
+    parser.add_argument('--s3_endpoint', default='', type=str, help='S3 endpoint URL')
+    parser.add_argument('--s3_data_endpoint', default=None, type=str, 
+                        help='S3 endpoint URL for the data (if different). If set to None, will be set to s3_endpoint')
+    parser.add_argument('--wds_n_repeats', default=1, type=int, help='Number of repeats for webdataset loader to improve efficiency')
+    parser.add_argument('--wds_shuffle_buffer_tar', default=1_000, type=int, help='Webdatasets shuffle buffer after loading tar files')
+    parser.add_argument('--wds_shuffle_buffer_repeat', default=1_000, type=int, help='Webdatasets shuffle buffer after repeating samples')
+    parser.add_argument('--s3_multipart_chunksize_mb', default=512, type=int)
+    parser.add_argument('--s3_multipart_threshold_mb', default=512, type=int)
+    parser.add_argument('--dataset_size', default=None, type=int, help='Needed for DDP when using webdatasets')
+
+    # Eval parameters
+    parser.add_argument('--dist_eval', action='store_true', default=False,
+                        help='Enabling distributed evaluation')
+    parser.add_argument('--no_dist_eval', action='store_false', dest='dist_eval',
+                    help='Disabling distributed evaluation')
+    parser.set_defaults(dist_eval=True)
+
+    parser.add_argument('--step_eval', action='store_true', default=False, help="Evaluate on a step basis")
+    parser.add_argument('--epoch_eval', action='store_false', dest='step_eval', help="Evaluate on an epoch basis")
+    parser.add_argument('--eval_noise_schedule', default='DDIMScheduler', type=str,
+                        help='Type of diffusers.schedulers noise scheduler for evaluation. (default: %(default)s)')
+    parser.add_argument('--num_eval_timesteps', default=50, type=int,
+                        help='Number of diffusion steps during evaluation (default: %(default)s)')
+    parser.add_argument('--input_size_eval', default="256", type=str,
+                        help='Evaluation is ran at this list of image sizes, split by  a hyphen (+ min and max size if they are different) (default: %(default)s)')
+    parser.add_argument('--num_eval_metrics_samples', default=None, type=int,
+                        help='Number of samples to use for computing evaluation metrics (default: %(default)s)')
+    parser.add_argument('--eval_freq', default=1, type=int, help="frequency of evaluation (in iterations or epochs)")
+    parser.add_argument('--eval_metrics_freq', default=1, type=int, help="frequency of evaluation metrics (in iterations or epochs)")
+    parser.add_argument('--eval_image_log_freq', default=5, type=int, help="frequency of evaluation image logging (in iterations)")
+    parser.add_argument('--num_logged_images', default=100, type=int, help="number of images to log")
+    parser.add_argument('--eval_only', action='store_true', default=False)
+    parser.add_argument('--no_inception', action='store_true', default=False, help="Disable Inception metric during eval")
+    parser.add_argument('--log_codebook_usage', action='store_true', help='Log the codebook usage')
+    parser.add_argument('--no_codebook_usage', action='store_false', dest='log_codebook_usage', help='Disable logging of the codebook usage')
+    parser.set_defaults(log_codebook_usage=True)
 
 
-def get_model(cfg: DictConfig, device: Union[torch.device, str]) -> DiVAE:
+    # Misc.
+    parser.add_argument('--output_dir', default='',
+                        help='Path where to save, empty for no saving')
+    parser.add_argument('--device', default='cuda',
+                        help='Device to use for training / testing')
+
+    parser.add_argument('--seed', default=0, type=int, help='Random seed ')
+    parser.add_argument('--resume', default='', help='resume from checkpoint')
+    parser.add_argument('--auto_resume', action='store_true')
+    parser.add_argument('--no_auto_resume', action='store_false', dest='auto_resume')
+    parser.set_defaults(auto_resume=True)
+
+    parser.add_argument('--start_epoch', default=0, type=int, metavar='N', help='start epoch')
+    parser.add_argument('--num_workers', default=10, type=int)
+    parser.add_argument('--pin_mem', action='store_true',
+                        help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
+    parser.add_argument('--no_pin_mem', action='store_false', dest='pin_mem',
+                        help='')
+    parser.set_defaults(pin_mem=True)
+    parser.add_argument('--find_unused_params', action='store_true')
+    parser.add_argument('--no_find_unused_params', action='store_false', dest='find_unused_params')
+    parser.set_defaults(find_unused_params=False)
+
+    # Wandb logging
+    parser.add_argument('--log_wandb', default=False, action='store_true',
+                        help='Log training and validation metrics to wandb')
+    parser.add_argument('--no_log_wandb', action='store_false', dest='log_wandb')
+    parser.set_defaults(log_wandb=False)
+    parser.add_argument('--wandb_project', default=None, type=str,
+                        help='Project name on wandb')
+    parser.add_argument('--wandb_entity', default=None, type=str,
+                        help='User or team name on wandb')
+    parser.add_argument('--wandb_run_name', default=None, type=str,
+                        help='Run name on wandb')
+    parser.add_argument('--wandb_tags', default='', type=str, help='Extra wandb tags, separated by a double hyphen')
+    parser.add_argument('--show_user_warnings', default=False, action='store_true')
+
+    # Distributed training parameters
+    parser.add_argument('--world_size', default=1, type=int,
+                        help='number of distributed processes')
+    parser.add_argument('--local_rank', default=-1, type=int)
+    parser.add_argument('--dist_on_itp', action='store_true')
+    parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
+
+    # S3 Load & Save
+    parser.add_argument('--s3_path', default='', type=str, help='S3 path to model')
+    parser.add_argument('--s3_save_dir', type=str, default="")
+
+    # Parse config file if there is one
+    args_config, remaining = config_parser.parse_known_args()
+    if args_config.config:
+        with open(args_config.config, 'r') as f:
+            cfg = yaml.safe_load(f)
+            parser.set_defaults(**cfg)
+
+    # The main arg parser parses the rest of the args, the usual
+    # defaults will have been overridden if config file specified.
+    args = parser.parse_args(remaining)
+
+    # Add the config path as a final args if given
+    args.config_path = args_config.config
+
+    return args
+
+
+def get_model(args: argparse.Namespace, device: Union[torch.device, str]) -> DiVAE:
     """Creates and returns model from arguments."""
 
     # Compute the dead codebook threshold
-    total_batch_size = cfg.batch_size * utils.get_world_size()
-    mean_img_size = (cfg.input_size_min + cfg.input_size_max) // 2
-    tokens_per_image = (mean_img_size // cfg.patch_size) ** 2
-    codebook_size_int = np.prod([int(d) for d in cfg.codebook_size.split('-')]) if isinstance(cfg.codebook_size, str) else cfg.codebook_size
+    total_batch_size = args.batch_size * utils.get_world_size()
+    mean_img_size = (args.input_size_min + args.input_size_max) // 2
+    tokens_per_image = (mean_img_size // args.patch_size) ** 2
+    codebook_size_int = np.prod([int(d) for d in args.codebook_size.split('-')]) if isinstance(args.codebook_size, str) else args.codebook_size
     uniform_token_count_per_batch = total_batch_size * tokens_per_image / codebook_size_int
-    threshold_ema_dead_code = uniform_token_count_per_batch / cfg.coef_ema_dead_code
+    threshold_ema_dead_code = uniform_token_count_per_batch / args.coef_ema_dead_code
     print(f'Computed dead code EMA threshold: {threshold_ema_dead_code:.4f}')
 
     ignore_keys = ['decoder', 'loss', 'post_quant_conv', 'post_quant_proj', 'encoder.pos_emb']
-    ckpt = cfg.encoder_ckpt
-    if cfg.full_ckpt is not None:
+    ckpt = args.encoder_ckpt
+    if args.full_ckpt is not None:
         ignore_keys = ['encoder.pos_emb']
-        ckpt = cfg.full_ckpt
+        ckpt = args.full_ckpt
 
-    n_channels = MODALITY_INFO[cfg.domain]['num_channels']
-    if cfg.mask_value is not None:
+    n_channels = MODALITY_INFO[args.domain]['num_channels']
+    if args.mask_value is not None:
         n_channels += 1
 
     model = DiVAE(
-        image_size=cfg.input_size_max,
-        image_size_enc=cfg.input_size_enc,
+        image_size=args.input_size_max,
+        image_size_enc=args.input_size_enc,
         n_channels=n_channels,
-        enc_type=cfg.encoder_type,
-        dec_type=cfg.decoder_type,
-        post_mlp=cfg.post_mlp,
-        quant_type=cfg.quantizer_type,
-        patch_size=cfg.patch_size,
-        codebook_size=cfg.codebook_size,
-        latent_dim=cfg.latent_dim,
-        norm_codes=cfg.norm_codes,
-        norm_latents=cfg.norm_latents,
-        prediction_type=cfg.prediction_type.split('-')[0],
-        num_train_timesteps=cfg.num_train_timesteps,
+        enc_type=args.encoder_type,
+        dec_type=args.decoder_type,
+        post_mlp=args.post_mlp,
+        quant_type=args.quantizer_type,
+        patch_size=args.patch_size,
+        codebook_size=args.codebook_size,
+        latent_dim=args.latent_dim,
+        norm_codes=args.norm_codes,
+        norm_latents=args.norm_latents,
+        prediction_type=args.prediction_type.split('-')[0],
+        num_train_timesteps=args.num_train_timesteps,
         ckpt_path=ckpt,
         ignore_keys=ignore_keys,
-        freeze_enc=cfg.freeze_enc,
-        cls_free_guidance_dropout=cfg.cls_free_guidance_dropout,
-        masked_cfg=cfg.masked_cfg,
-        masked_cfg_low=cfg.masked_cfg_low,
-        masked_cfg_high=cfg.masked_cfg_high,
-        beta_schedule=cfg.beta_schedule,
-        thresholding=cfg.thresholding,
+        freeze_enc=args.freeze_enc,
+        cls_free_guidance_dropout=args.cls_free_guidance_dropout,
+        masked_cfg=args.masked_cfg,
+        masked_cfg_low=args.masked_cfg_low,
+        masked_cfg_high=args.masked_cfg_high,
+        beta_schedule=args.beta_schedule,
+        thresholding=args.thresholding,
         sync_codebook=True,
-        ema_decay=cfg.quantizer_ema_decay,
+        ema_decay=args.quantizer_ema_decay,
         threshold_ema_dead_code=threshold_ema_dead_code,
-        code_replacement_policy=cfg.code_replacement_policy,
-        commitment_weight=cfg.commitment_weight,
-        kmeans_init=cfg.kmeans_init,
+        code_replacement_policy=args.code_replacement_policy,
+        commitment_weight=args.commitment_weight,
+        kmeans_init=args.kmeans_init,
         undo_std=False,
-        conditioning=cfg.conditioning,
-        dec_transformer_dropout=cfg.dec_transformer_dropout,
-        zero_terminal_snr=cfg.zero_terminal_snr,
+        conditioning=args.conditioning,
+        dec_transformer_dropout=args.dec_transformer_dropout,
+        zero_terminal_snr=args.zero_terminal_snr,
     )
 
     return model.to(device)
 
-@hydra.main(config_path="../conf", config_name="config_divae")
-def main(cfg: DictConfig) -> None:
+
+def main(args: argparse.Namespace) -> None:
     """Main function for training and evaluation."""
-    utils.init_distributed_mode(cfg)
-    device = torch.device(cfg.device)
+    utils.init_distributed_mode(args)
+    device = torch.device(args.device)
 
     # Fix the seed for reproducibility
-    seed = cfg.seed + utils.get_rank()
+    seed = args.seed + utils.get_rank()
     torch.manual_seed(seed)
     np.random.seed(seed)
     # random.seed(seed)
 
     cudnn.benchmark = True
 
-    if not cfg.show_user_warnings:
+    if not args.show_user_warnings:
         warnings.filterwarnings("ignore", category=UserWarning)
 
-    if cfg.dtype in ['float16', 'fp16']:
+    if args.dtype in ['float16', 'fp16']:
         dtype = torch.float16
-    elif cfg.dtype in ['bfloat16', 'bf16']:
+    elif args.dtype in ['bfloat16', 'bf16']:
         dtype = torch.bfloat16
-    elif cfg.dtype in ['float32', 'fp32']:
+    elif args.dtype in ['float32', 'fp32']:
         dtype = torch.float32
     else:
-        raise ValueError(f"Invalid dtype: {cfg.dtype}")
+        raise ValueError(f"Invalid dtype: {args.dtype}")
 
     num_tasks = utils.get_world_size()
-    cfg.num_tasks = num_tasks
+    args.num_tasks = num_tasks
     global_rank = utils.get_rank()
     sampler_rank = global_rank
 
-    cfg.eval_res_cond = to_2tuple(cfg.eval_res_cond) if cfg.resolution_cond else None
+    args.eval_res_cond = to_2tuple(args.eval_res_cond) if args.resolution_cond else None
 
-    cfg.all_domains = [cfg.domain] if cfg.mask_value is None else [cfg.domain, 'mask_valid']
+    args.all_domains = [args.domain] if args.mask_value is None else [args.domain, 'mask_valid']
     
-    modality_info = setup_modality_info(cfg)
+    modality_info = setup_modality_info(args)
     modality_paths = {mod: modality_info[mod]['path'] for mod in modality_info if modality_info[mod].get('path', None) is not None}
 
-    cfg.input_size = cfg.input_size_max # For multi-resolution training, load the largest resolution and downsample accordingly
-    image_augmenter_train = RandomCropImageAugmenter(target_size=cfg.input_size, main_domain=cfg.domain, crop_scale=(cfg.min_crop_scale, 1.0))
+    args.input_size = args.input_size_max # For multi-resolution training, load the largest resolution and downsample accordingly
+    image_augmenter_train = RandomCropImageAugmenter(target_size=args.input_size, main_domain=args.domain, crop_scale=(args.min_crop_scale, 1.0))
 
-    MODALITY_TRANSFORMS_DIVAE['normal'] = NormalTransform(standardize_surface_normals=cfg.standardize_surface_normals)
-    MODALITY_TRANSFORMS_DIVAE['rgb'] = RGBTransform(imagenet_default_mean_and_std=cfg.imagenet_default_mean_and_std)
+    MODALITY_TRANSFORMS_DIVAE['normal'] = NormalTransform(standardize_surface_normals=args.standardize_surface_normals)
+    MODALITY_TRANSFORMS_DIVAE['rgb'] = RGBTransform(imagenet_default_mean_and_std=args.imagenet_default_mean_and_std)
 
-    if cfg.use_wds:
-        if cfg.data_path.startswith("s3"):
+    if args.use_wds:
+        if args.data_path.startswith("s3"):
             # When loading from S3 using boto3, hijack webdatasets tar loading
             MB = 1024 ** 2
             transfer_config = TransferConfig(
-                multipart_threshold=cfg.s3_multipart_threshold_mb * MB, 
-                multipart_chunksize=cfg.s3_multipart_chunksize_mb * MB, 
+                multipart_threshold=args.s3_multipart_threshold_mb * MB, 
+                multipart_chunksize=args.s3_multipart_chunksize_mb * MB, 
                 max_io_queue=1000)
 
             s3_client = boto3.client(
                 service_name='s3',
                 aws_access_key_id=os.environ['AWS_ACCESS_KEY_ID'],
                 aws_secret_access_key=os.environ['AWS_SECRET_ACCESS_KEY'],
-                endpoint_url=cfg.s3_data_endpoint,
+                endpoint_url=args.s3_data_endpoint,
             )
 
             def get_bytes_io(path):
@@ -239,20 +505,20 @@ def main(cfg: DictConfig) -> None:
 
         # When using webdatasets
         data_loader_train = build_wds_divae_dataloader(
-            data_path=cfg.data_path, modality_info=modality_info, modality_transforms=MODALITY_TRANSFORMS_DIVAE,
-            image_augmenter=image_augmenter_train, num_gpus=num_tasks, num_workers=cfg.num_workers,
-            batch_size=cfg.batch_size, epoch_size=cfg.dataset_size, shuffle_buffer_load=cfg.wds_shuffle_buffer_tar,
-            shuffle_buffer_repeat=cfg.wds_shuffle_buffer_repeat, n_repeats=cfg.wds_n_repeats,
+            data_path=args.data_path, modality_info=modality_info, modality_transforms=MODALITY_TRANSFORMS_DIVAE,
+            image_augmenter=image_augmenter_train, num_gpus=num_tasks, num_workers=args.num_workers,
+            batch_size=args.batch_size, epoch_size=args.dataset_size, shuffle_buffer_load=args.wds_shuffle_buffer_tar,
+            shuffle_buffer_repeat=args.wds_shuffle_buffer_repeat, n_repeats=args.wds_n_repeats,
         )
 
         
-        num_training_steps_per_epoch = cfg.dataset_size // (cfg.batch_size * num_tasks)
+        num_training_steps_per_epoch = args.dataset_size // (args.batch_size * num_tasks)
     else:
-        transforms_train = UnifiedDataTransform(transforms_dict=MODALITY_TRANSFORMS_DIVAE, image_augmenter=image_augmenter_train, add_sizes=cfg.resolution_cond)
-        dataset_train = MultiModalDatasetFolder(root=cfg.data_path, modalities=cfg.all_domains, modality_paths=modality_paths, 
-                                                modality_transforms=MODALITY_TRANSFORMS_DIVAE, transform=transforms_train, cache=cfg.cache_datasets)
+        transforms_train = UnifiedDataTransform(transforms_dict=MODALITY_TRANSFORMS_DIVAE, image_augmenter=image_augmenter_train, add_sizes=args.resolution_cond)
+        dataset_train = MultiModalDatasetFolder(root=args.data_path, modalities=args.all_domains, modality_paths=modality_paths, 
+                                                modality_transforms=MODALITY_TRANSFORMS_DIVAE, transform=transforms_train, cache=args.cache_datasets)
 
-        num_training_steps_per_epoch = len(dataset_train) // (cfg.batch_size * num_tasks)
+        num_training_steps_per_epoch = len(dataset_train) // (args.batch_size * num_tasks)
         sampler_train = torch.utils.data.DistributedSampler(
             dataset_train, num_replicas=num_tasks, rank=sampler_rank, shuffle=True, drop_last=True,
         )
@@ -260,19 +526,19 @@ def main(cfg: DictConfig) -> None:
 
         data_loader_train = torch.utils.data.DataLoader(
             dataset_train, sampler=sampler_train,
-            batch_size=cfg.batch_size,
-            num_workers=cfg.num_workers,
-            pin_memory=cfg.pin_mem,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            pin_memory=args.pin_mem,
             drop_last=True,
         )
 
-    if cfg.eval_data_path:
-        image_augmenter_val = CenterCropImageAugmenter(target_size=cfg.input_size, main_domain=cfg.domain)
-        transforms_val = UnifiedDataTransform(transforms_dict=MODALITY_TRANSFORMS_DIVAE, image_augmenter=image_augmenter_val, add_sizes=cfg.resolution_cond)
+    if args.eval_data_path:
+        image_augmenter_val = CenterCropImageAugmenter(target_size=args.input_size, main_domain=args.domain)
+        transforms_val = UnifiedDataTransform(transforms_dict=MODALITY_TRANSFORMS_DIVAE, image_augmenter=image_augmenter_val, add_sizes=args.resolution_cond)
 
-        dataset_val = MultiModalDatasetFolder(root=cfg.eval_data_path, modalities=cfg.all_domains, modality_paths=modality_paths, 
-                                              modality_transforms=MODALITY_TRANSFORMS_DIVAE, transform=transforms_val, cache=cfg.cache_datasets)
-        if cfg.dist_eval:
+        dataset_val = MultiModalDatasetFolder(root=args.eval_data_path, modalities=args.all_domains, modality_paths=modality_paths, 
+                                              modality_transforms=MODALITY_TRANSFORMS_DIVAE, transform=transforms_val, cache=args.cache_datasets)
+        if args.dist_eval:
             if len(dataset_val) % num_tasks != 0:
                 print('Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. '
                     'This will slightly alter validation results as extra duplicate entries are added to achieve '
@@ -284,18 +550,18 @@ def main(cfg: DictConfig) -> None:
             
         data_loader_val = torch.utils.data.DataLoader(
             dataset_val, sampler=sampler_val,
-            batch_size=int(1.5 * cfg.batch_size) if cfg.batch_size_eval is None else cfg.batch_size_eval,
-            num_workers=cfg.num_workers,
-            pin_memory=cfg.pin_mem,
+            batch_size=int(1.5 * args.batch_size) if args.batch_size_eval is None else args.batch_size_eval,
+            num_workers=args.num_workers,
+            pin_memory=args.pin_mem,
             drop_last=False,
         )
 
         # Computing image metrics can be expensive (because of the many diffusion forward passes), so we can choose to only do it on a subset of the data
-        if cfg.num_eval_metrics_samples is not None:
-            dataset_metrics = MultiModalDatasetFolder(root=cfg.eval_data_path, modalities=cfg.all_domains, modality_paths=modality_paths, 
+        if args.num_eval_metrics_samples is not None:
+            dataset_metrics = MultiModalDatasetFolder(root=args.eval_data_path, modalities=args.all_domains, modality_paths=modality_paths, 
                                                     modality_transforms=MODALITY_TRANSFORMS_DIVAE, transform=transforms_val, 
-                                                    pre_shuffle=True, max_samples=cfg.num_eval_metrics_samples, cache=cfg.cache_datasets)
-            if cfg.dist_eval:
+                                                    pre_shuffle=True, max_samples=args.num_eval_metrics_samples, cache=args.cache_datasets)
+            if args.dist_eval:
                 if len(dataset_metrics) % num_tasks != 0:
                     print('Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. '
                         'This will slightly alter validation results as extra duplicate entries are added to achieve '
@@ -307,25 +573,25 @@ def main(cfg: DictConfig) -> None:
 
             data_loader_metrics = torch.utils.data.DataLoader(
                 dataset_metrics, sampler=sampler_metrics,
-                batch_size=int(1.5 * cfg.batch_size) if cfg.batch_size_eval is None else cfg.batch_size_eval,
-                num_workers=cfg.num_workers,
-                pin_memory=cfg.pin_mem,
+                batch_size=int(1.5 * args.batch_size) if args.batch_size_eval is None else args.batch_size_eval,
+                num_workers=args.num_workers,
+                pin_memory=args.pin_mem,
                 drop_last=False,
             )
         else:
             data_loader_metrics = data_loader_val
 
-        if cfg.num_logged_images is not None:
-            dataset_image_log = MultiModalDatasetFolder(root=cfg.eval_data_path, modalities=cfg.all_domains, modality_paths=modality_paths, 
+        if args.num_logged_images is not None:
+            dataset_image_log = MultiModalDatasetFolder(root=args.eval_data_path, modalities=args.all_domains, modality_paths=modality_paths, 
                                                     modality_transforms=MODALITY_TRANSFORMS_DIVAE, transform=transforms_val, 
-                                                    pre_shuffle=True, max_samples=cfg.num_logged_images, cache=cfg.cache_datasets)
+                                                    pre_shuffle=True, max_samples=args.num_logged_images, cache=args.cache_datasets)
             # No dist eval, we only run it on the main process
             sampler_image_log = torch.utils.data.SequentialSampler(dataset_image_log)
             data_loader_image_log = torch.utils.data.DataLoader(
                 dataset_image_log, sampler=sampler_image_log,
-                batch_size=int(1.5 * cfg.batch_size) if cfg.batch_size_eval is None else cfg.batch_size_eval,
-                num_workers=cfg.num_workers,
-                pin_memory=cfg.pin_mem,
+                batch_size=int(1.5 * args.batch_size) if args.batch_size_eval is None else args.batch_size_eval,
+                num_workers=args.num_workers,
+                pin_memory=args.pin_mem,
                 drop_last=False,
             )
         else:
@@ -334,31 +600,31 @@ def main(cfg: DictConfig) -> None:
     else:
         data_loader_val, data_loader_metrics, dataset_image_log = None, None, None
 
-    if global_rank == 0 and cfg.log_wandb:
-        log_writer = utils.WandbLogger(cfg)
+    if global_rank == 0 and args.log_wandb:
+        log_writer = utils.WandbLogger(args)
         log_writer.set_step(0)
     else:
         log_writer = None
 
-    if global_rank == 0 and cfg.log_wandb:
+    if global_rank == 0 and args.log_wandb:
         # Edit run name and add tags
-        cfg.wandb_tags = cfg.wandb_tags.split('--') if cfg.wandb_tags else []
-        log_writer = utils.WandbLogger(cfg)
+        args.wandb_tags = args.wandb_tags.split('--') if args.wandb_tags else []
+        log_writer = utils.WandbLogger(args)
         log_writer.set_step(0)
     else:
         log_writer = None
 
-    print(cfg)
+    print(args)
 
-    model = get_model(cfg, device)
-    if cfg.model_ema:
+    model = get_model(args, device)
+    if args.model_ema:
         # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
         model_ema = ModelEma(
             model,
-            decay=cfg.model_ema_decay,
-            device='cpu' if cfg.model_ema_force_cpu else '',
+            decay=args.model_ema_decay,
+            device='cpu' if args.model_ema_force_cpu else '',
             resume='')
-        print("Using EMA with decay = %.8f" % cfg.model_ema_decay)
+        print("Using EMA with decay = %.8f" % args.model_ema_decay)
     else:
         model_ema = None
     
@@ -368,71 +634,71 @@ def main(cfg: DictConfig) -> None:
     print(f"Model = %s" % str(model_without_ddp))
     print(f"Number of params: {n_parameters / 1e6} M")
 
-    total_batch_size = cfg.batch_size * utils.get_world_size()
-    cfg.lr = cfg.blr * total_batch_size / 256
+    total_batch_size = args.batch_size * utils.get_world_size()
+    args.lr = args.blr * total_batch_size / 256
 
-    print("LR = %.8f" % cfg.lr)
+    print("LR = %.8f" % args.lr)
     print("Batch size = %d" % total_batch_size)
     print("Number of training steps = %d" % num_training_steps_per_epoch)
     print("Number of training examples per epoch = %d" % (total_batch_size * num_training_steps_per_epoch))
 
-    if cfg.distributed:
-        model = DDP(model, device_ids=[cfg.gpu], find_unused_parameters=cfg.find_unused_params)
+    if args.distributed:
+        model = DDP(model, device_ids=[args.gpu], find_unused_parameters=args.find_unused_params)
         model_without_ddp = model.module
 
-    optimizer = create_optimizer(cfg, model_without_ddp)
+    optimizer = create_optimizer(args, model_without_ddp)
     loss_scaler = NativeScaler(enabled=dtype == torch.float16)
 
     print("Use step level LR & WD scheduler!")
     lr_schedule_values = utils.cosine_scheduler(
-        cfg.lr, cfg.min_lr, cfg.epochs, num_training_steps_per_epoch,
-        warmup_epochs=cfg.warmup_epochs, warmup_steps=cfg.warmup_steps,
+        args.lr, args.min_lr, args.epochs, num_training_steps_per_epoch,
+        warmup_epochs=args.warmup_epochs, warmup_steps=args.warmup_steps,
     )
-    if cfg.weight_decay_end is None:
-        cfg.weight_decay_end = cfg.weight_decay
+    if args.weight_decay_end is None:
+        args.weight_decay_end = args.weight_decay
     wd_schedule_values = utils.cosine_scheduler(
-        cfg.weight_decay, cfg.weight_decay_end, cfg.epochs, num_training_steps_per_epoch)
+        args.weight_decay, args.weight_decay_end, args.epochs, num_training_steps_per_epoch)
     print("Max WD = %.7f, Min WD = %.7f" % (max(wd_schedule_values), min(wd_schedule_values)))
 
     utils.auto_load_model(
-        args=cfg, model=model, model_without_ddp=model_without_ddp, 
+        args=args, model=model, model_without_ddp=model_without_ddp, 
         optimizer=optimizer, loss_scaler=loss_scaler, model_ema=model_ema)
     
     # Evaluation noise scheduler
-    if cfg.eval_noise_schedule in ['DDPMScheduler', 'DDIMScheduler']:
-        eval_noise_schedule = getattr(sys.modules[__name__], cfg.eval_noise_schedule)(
-            num_train_timesteps=cfg.num_train_timesteps,
-            beta_schedule=cfg.beta_schedule,
-            prediction_type=cfg.prediction_type.split('-')[0],
-            thresholding=cfg.thresholding,
+    if args.eval_noise_schedule in ['DDPMScheduler', 'DDIMScheduler']:
+        eval_noise_schedule = getattr(sys.modules[__name__], args.eval_noise_schedule)(
+            num_train_timesteps=args.num_train_timesteps,
+            beta_schedule=args.beta_schedule,
+            prediction_type=args.prediction_type.split('-')[0],
+            thresholding=args.thresholding,
             clip_sample=False,
-            zero_terminal_snr=cfg.zero_terminal_snr
+            zero_terminal_snr=args.zero_terminal_snr
         )
-    elif cfg.eval_noise_schedule is not None:
-        eval_noise_schedule = getattr(diffusers_schedulers, cfg.eval_noise_schedule)(
-            num_train_timesteps=cfg.num_train_timesteps,
-            beta_schedule=cfg.beta_schedule,
-            prediction_type=cfg.prediction_type.split('-')[0],
-            thresholding=cfg.thresholding,
+    elif args.eval_noise_schedule is not None:
+        eval_noise_schedule = getattr(diffusers_schedulers, args.eval_noise_schedule)(
+            num_train_timesteps=args.num_train_timesteps,
+            beta_schedule=args.beta_schedule,
+            prediction_type=args.prediction_type.split('-')[0],
+            thresholding=args.thresholding,
             clip_sample=False
         )
     else:
         eval_noise_schedule = None
 
     # The various train resolutions
-    train_res_choices = list(range(cfg.input_size_min, cfg.input_size_max+cfg.resolution_step, cfg.resolution_step))
+    train_res_choices = list(range(args.input_size_min, args.input_size_max+args.resolution_step, args.resolution_step))
 
-    if isinstance(cfg.input_size_eval, str):
-        cfg.input_size_eval = [int(s) for s in cfg.input_size_eval.split("-")]
-    elif isinstance(cfg.input_size_eval, int):
-        cfg.input_size_eval = [cfg.input_size_eval]
-    eval_image_sizes = set([*cfg.input_size_eval, train_res_choices[0], train_res_choices[-1]])
+    if isinstance(args.input_size_eval, str):
+        args.input_size_eval = [int(s) for s in args.input_size_eval.split("-")]
+    elif isinstance(args.input_size_eval, int):
+        args.input_size_eval = [args.input_size_eval]
+    eval_image_sizes = set([*args.input_size_eval, train_res_choices[0], train_res_choices[-1]])
 
-    if cfg.eval_only:
+    if args.eval_only:
         # Evaluate the model
         eval_stats = evaluate(
-            model, data_loader_val, device, cfg.domain, train_res_choices, cfg.prediction_type, 
-            cfg.loss_fn, cfg.codebook_weight, dtype=dtype, mask_value=cfg.mask_value,
+            model, data_loader_val, device, args.domain, train_res_choices, args.prediction_type, 
+            args.loss_fn, args.codebook_weight, dtype=dtype, mask_value=args.mask_value,
         )
         if log_writer is not None:
             log_writer.update(eval_stats)
@@ -440,22 +706,22 @@ def main(cfg: DictConfig) -> None:
         # Evaluate several common metrics at eval resolution, min train resolution and max train resolutions
         for eval_img_size in eval_image_sizes:
             eval_metrics_results = eval_metrics(
-                model, data_loader_metrics, device, cfg.domain, eval_img_size, eval_noise_schedule, 
-                cfg.num_eval_timesteps, dtype=dtype, mask_value=cfg.mask_value,
-                no_inception=cfg.no_inception, log_writer=log_writer, log_codebook_usage=cfg.log_codebook_usage,
+                model, data_loader_metrics, device, args.domain, eval_img_size, eval_noise_schedule, 
+                args.num_eval_timesteps, dtype=dtype, mask_value=args.mask_value,
+                no_inception=args.no_inception, log_writer=log_writer, log_codebook_usage=args.log_codebook_usage,
             )
             if log_writer is not None:
                 log_writer.update(eval_metrics_results)
 
-            eval_image_log(model, data_loader_image_log, device, cfg.domain, eval_img_size, eval_noise_schedule, 
-                           cfg.num_eval_timesteps, dtype=dtype, num_logged_images=cfg.num_logged_images, 
-                           mask_value=cfg.mask_value, log_writer=log_writer)
+            eval_image_log(model, data_loader_image_log, device, args.domain, eval_img_size, eval_noise_schedule, 
+                           args.num_eval_timesteps, dtype=dtype, num_logged_images=args.num_logged_images, 
+                           mask_value=args.mask_value, log_writer=log_writer)
 
         exit(0)
 
-    print(f"Start training for {cfg.epochs} epochs")
+    print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
-    for epoch in range(cfg.start_epoch, cfg.epochs):
+    for epoch in range(args.start_epoch, args.epochs):
         if log_writer is not None:
             log_writer.set_step(epoch * num_training_steps_per_epoch)
         train_stats = train_one_epoch(
@@ -465,15 +731,15 @@ def main(cfg: DictConfig) -> None:
             device=device,
             epoch=epoch,
             loss_scaler=loss_scaler,
-            domain=cfg.domain,
-            codebook_weight=cfg.codebook_weight,
+            domain=args.domain,
+            codebook_weight=args.codebook_weight,
             train_res_choices=train_res_choices, 
             eval_image_sizes=eval_image_sizes,
             eval_noise_schedule=eval_noise_schedule,
-            num_eval_timesteps=cfg.num_eval_timesteps,
+            num_eval_timesteps=args.num_eval_timesteps,
             model_ema=model_ema,
-            max_norm=cfg.clip_grad,
-            max_skip_norm=cfg.skip_grad,
+            max_norm=args.clip_grad,
+            max_skip_norm=args.skip_grad,
             log_writer=log_writer,
             start_steps=epoch * num_training_steps_per_epoch,
             lr_schedule_values=lr_schedule_values,
@@ -483,28 +749,28 @@ def main(cfg: DictConfig) -> None:
             data_loader_val=data_loader_val, 
             data_loader_metrics=data_loader_metrics,
             data_loader_image_log=data_loader_image_log,
-            eval_freq=cfg.eval_freq,
-            eval_metrics_freq=cfg.eval_metrics_freq,
-            eval_image_log_freq=cfg.eval_image_log_freq,
-            num_logged_images=cfg.num_logged_images,
-            prediction_type=cfg.prediction_type,
-            loss_fn=cfg.loss_fn,
-            ema_freq=cfg.model_ema_update_freq,
-            mask_value=cfg.mask_value,
-            no_inception=cfg.no_inception,
-            log_codebook_usage=cfg.log_codebook_usage,
-            step_eval=cfg.step_eval,
+            eval_freq=args.eval_freq,
+            eval_metrics_freq=args.eval_metrics_freq,
+            eval_image_log_freq=args.eval_image_log_freq,
+            num_logged_images=args.num_logged_images,
+            prediction_type=args.prediction_type,
+            loss_fn=args.loss_fn,
+            ema_freq=args.model_ema_update_freq,
+            mask_value=args.mask_value,
+            no_inception=args.no_inception,
+            log_codebook_usage=args.log_codebook_usage,
+            step_eval=args.step_eval,
         )
 
-        if cfg.output_dir:
-            if (epoch + 1) % cfg.save_ckpt_freq == 0 or epoch + 1 == cfg.epochs:
+        if args.output_dir:
+            if (epoch + 1) % args.save_ckpt_freq == 0 or epoch + 1 == args.epochs:
                 utils.save_model(
-                    args=cfg, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
+                    args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                     loss_scaler=loss_scaler, epoch=epoch, model_ema=model_ema)
-                if epoch + 1 == cfg.epochs:
-                        use_s3 = len(cfg.s3_save_dir) > 0
+                if epoch + 1 == args.epochs:
+                        use_s3 = len(args.s3_save_dir) > 0
                         utils.save_model(
-                            args=cfg, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
+                            args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                             loss_scaler=loss_scaler, epoch=epoch, model_ema=model_ema, ckpt_name='final', use_s3=use_s3)
 
         log_stats = {**{k: v for k, v in train_stats.items()},
@@ -512,19 +778,19 @@ def main(cfg: DictConfig) -> None:
                      'n_parameters': n_parameters}
 
         # Evaluation (if we evaluate on an epoch-basis)
-        if not cfg.step_eval or (epoch + 1 == cfg.epochs):
-            launch_evaluate = (data_loader_val is not None) and ((epoch % cfg.eval_freq == 0) or (epoch + 1 == cfg.epochs))
-            launch_eval_metrics = (data_loader_metrics is not None) and cfg.eval_metrics_freq > 0 and  ((epoch % cfg.eval_metrics_freq == 0) or (epoch + 1 == cfg.epochs))
-            launch_eval_image_log = (data_loader_image_log is not None) and cfg.eval_image_log_freq > 0 and  ((epoch % cfg.eval_image_log_freq == 0) or (epoch + 1 == cfg.epochs))
+        if not args.step_eval or (epoch + 1 == args.epochs):
+            launch_evaluate = (data_loader_val is not None) and ((epoch % args.eval_freq == 0) or (epoch + 1 == args.epochs))
+            launch_eval_metrics = (data_loader_metrics is not None) and args.eval_metrics_freq > 0 and  ((epoch % args.eval_metrics_freq == 0) or (epoch + 1 == args.epochs))
+            launch_eval_image_log = (data_loader_image_log is not None) and args.eval_image_log_freq > 0 and  ((epoch % args.eval_image_log_freq == 0) or (epoch + 1 == args.epochs))
 
             eval_stats = launch_evals(
                 launch_evaluate=launch_evaluate, launch_eval_metrics=launch_eval_metrics, launch_eval_image_log=launch_eval_image_log,
-                model=model, device=device, domain=cfg.domain, codebook_weight=cfg.codebook_weight, train_res_choices=train_res_choices,
-                eval_image_sizes=eval_image_sizes, eval_noise_schedule=eval_noise_schedule, num_eval_timesteps=cfg.num_eval_timesteps,
+                model=model, device=device, domain=args.domain, codebook_weight=args.codebook_weight, train_res_choices=train_res_choices,
+                eval_image_sizes=eval_image_sizes, eval_noise_schedule=eval_noise_schedule, num_eval_timesteps=args.num_eval_timesteps,
                 model_ema=model_ema, dtype=dtype, data_loader_val=data_loader_val, data_loader_metrics=data_loader_metrics,
-                data_loader_image_log=data_loader_image_log, num_logged_images=cfg.num_logged_images, prediction_type=cfg.prediction_type,
-                loss_fn=cfg.loss_fn, mask_value=cfg.mask_value, no_inception=cfg.no_inception, 
-                log_writer=log_writer, log_codebook_usage=cfg.log_codebook_usage,
+                data_loader_image_log=data_loader_image_log, num_logged_images=args.num_logged_images, prediction_type=args.prediction_type,
+                loss_fn=args.loss_fn, mask_value=args.mask_value, no_inception=args.no_inception, 
+                log_writer=log_writer, log_codebook_usage=args.log_codebook_usage,
             )
             
             log_stats.update(eval_stats)
@@ -532,8 +798,8 @@ def main(cfg: DictConfig) -> None:
         if log_writer is not None:
             log_writer.update(log_stats)
 
-        if cfg.output_dir and utils.is_main_process():
-            with open(os.path.join(cfg.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
+        if args.output_dir and utils.is_main_process():
+            with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
     total_time = time.time() - start_time
@@ -1330,4 +1596,12 @@ def eval_image_log(model: Union[nn.Module, DDP],
 
 
 if __name__ == '__main__':
-    main()
+    args = get_args()
+    
+    utils.setup_run_name(args)
+    utils.setup_s3_args(args)
+
+    if args.output_dir:
+        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+
+    main(args)

@@ -11,18 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from functools import partial
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 from einops import repeat
-
 from .fm_utils import build_1d_sincos_posemb, build_2d_sincos_posemb, pair
 
 
 # TODO: add foul decoder here?
 
+
+    
 
 class SequenceDecoderEmbedding(nn.Module):
     """Embedding module for sequence inputs, like captions or a sequence of objects.
@@ -54,7 +54,7 @@ class SequenceDecoderEmbedding(nn.Module):
         self.share_embedding = share_embedding
 
         if self.dim_tokens is not None:
-            self.init(dim_tokens=dim_tokens)
+            self.init(dim_tokens=self.dim_tokens)
 
     def init(self, dim_tokens: int = 768, init_std=0.02):
         """
@@ -185,7 +185,7 @@ class ImageTokenDecoderEmbedding(nn.Module):
         self.share_embedding = share_embedding
 
         if self.dim_tokens is not None:
-            self.init(dim_tokens=dim_tokens)
+            self.init(dim_tokens=self.dim_tokens)
 
     def init(self, dim_tokens: int = 768, init_std=0.02):
         """

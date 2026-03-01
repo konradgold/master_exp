@@ -1,0 +1,109 @@
+# 4M Training Configuration
+
+# Run name
+run_name: 'auto'
+
+# Training parameters
+batch_size: 256
+epochs: 100
+total_tokens: -1
+accum_iter: 1
+save_ckpt_freq: 20
+
+# Model parameters
+model: 'fm_base_12e_12d_swiglu_nobias'
+patch_size: 16
+input_size: 224
+num_register_tokens: 0
+dtype: 'bfloat16'
+
+num_input_tokens: 128
+num_target_tokens: 128
+min_input_tokens: null
+min_target_tokens: null
+
+loss_type: 'mod'
+
+# Weight init / fine-tune parameters
+finetune: ''
+
+# Optimizer parameters
+opt: 'adamw'
+opt_eps: 1.0e-8
+opt_betas: [0.9, 0.95]
+compute_grad_norm: true
+clip_grad: null
+skip_grad: null
+momentum: 0.9
+weight_decay: 0.05
+weight_decay_end: null
+
+blr: 1.0e-4
+min_blr: 0.0
+frozen_model_blr: -1
+scheduler: 'cosine'
+warmup_epochs: 10
+warmup_steps: -1
+warmup_tokens: -1
+cooldown_epochs: 10
+cooldown_steps: -1
+cooldown_tokens: -1
+
+# Frozen model parameters
+frozen_model_epochs: 0
+frozen_model_tokens: 0
+frozen_embedding_domain: null
+
+# Dataset parameters
+data_config: ''
+epoch_size: null
+s3_endpoint: ''
+s3_data_endpoint: null
+s3_multipart_chunksize_mb: 512
+s3_multipart_threshold_mb: 512
+s3_max_io_queue: 100
+
+# Text tokenizer
+text_tokenizer_path: 'fourm/utils/tokenizer/trained/text_tokenizer_4m_wordpiece_30k.json'
+
+# Eval parameters
+eval_freq: 10
+dist_eval: true
+fixed_eval: true
+fixed_eval_input_tokens: 128
+fixed_eval_target_tokens: 128
+fixed_eval_batch_size: 32
+eval: false
+
+# Misc
+output_dir: ''
+device: 'cuda'
+seed: 0
+resume: ''
+auto_resume: true
+start_epoch: 0
+num_workers: 10
+pin_mem: true
+find_unused_params: false
+
+rlimit: 4096
+print_all: false
+show_user_warnings: false
+s3_save_dir: ''
+
+# Distributed training parameters
+dist_url: 'env://'
+
+# Wandb logging
+log_wandb: false
+wandb_project: null
+wandb_entity: null
+wandb_run_name: 'auto'
+
+# Config path (for compatibility)
+config_path: null
+
+# These will be populated by setup_data
+all_domains: []
+in_domains: []
+out_domains: []

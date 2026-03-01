@@ -1,0 +1,125 @@
+# VQ-VAE Training Configuration
+
+# Model parameters
+patch_size: 16
+input_size_min: 224
+input_size_max: 512
+resolution_step: 32
+input_size_enc: null
+input_size_dec: null
+mask_size: 64
+encoder_type: 'vit_s_enc'
+decoder_type: 'vit_b_dec'
+post_mlp: true
+encoder_ckpt: null
+full_ckpt: null
+freeze_enc: false
+out_conv: false
+loss_fn: 'mse'
+percept_loss_type: null
+percept_loss_blocks: 'blocks.2-blocks.5-blocks.8-blocks.11'
+percept_loss_distance: 'cosine'
+percept_loss_weight: 0.0
+
+# Quantizer parameters
+quantizer_type: 'lucid'
+codebook_size: 8192
+num_codebooks: 1
+latent_dim: 32
+norm_codes: true
+norm_latents: false
+codebook_weight: 1.0
+quantizer_ema_decay: 0.8
+coef_ema_dead_code: 4.0
+code_replacement_policy: 'batch_random'
+commitment_weight: 1.0
+kmeans_init: false
+
+# Optimizer parameters
+batch_size: 256
+batch_size_eval: null
+epochs: 100
+save_ckpt_freq: 10
+opt: 'adamw'
+opt_eps: 1.0e-8
+opt_betas: [0.9, 0.95]
+clip_grad: null
+skip_grad: null
+momentum: 0.9
+weight_decay: 0.05
+weight_decay_end: null
+blr: 1.0e-4
+warmup_lr: 1.0e-6
+min_lr: 0.0
+warmup_epochs: 5
+warmup_steps: -1
+dtype: 'float16'
+dtype_percept: null
+model_ema: true
+model_ema_decay: 0.9999
+model_ema_force_cpu: false
+model_ema_update_freq: 1
+
+# Augmentation parameters
+hflip: 0.5
+
+# Dataset parameters
+domain: 'rgb'
+mask_value: null
+data_path: null
+eval_data_path: null
+imagenet_default_mean_and_std: false
+standardize_surface_normals: false
+min_crop_scale: 0.8
+cache_datasets: false
+use_wds: false
+s3_endpoint: ''
+s3_data_endpoint: null
+wds_n_repeats: 1
+wds_shuffle_buffer_tar: 1000
+wds_shuffle_buffer_repeat: 1000
+s3_multipart_chunksize_mb: 512
+s3_multipart_threshold_mb: 512
+dataset_size: null
+
+# Eval parameters
+dist_eval: true
+step_eval: false
+input_size_eval: "256"
+num_eval_metrics_samples: null
+eval_freq: 1
+eval_metrics_freq: 1
+eval_image_log_freq: 5
+num_logged_images: 100
+eval_only: false
+no_inception: false
+log_codebook_usage: true
+
+# Misc
+output_dir: ''
+device: 'cuda'
+seed: 0
+resume: ''
+auto_resume: true
+start_epoch: 0
+num_workers: 10
+pin_mem: true
+find_unused_params: false
+
+# Wandb logging
+log_wandb: false
+wandb_project: null
+wandb_entity: null
+wandb_run_name: null
+wandb_tags: ''
+show_user_warnings: false
+
+# Distributed training parameters
+world_size: 1
+local_rank: -1
+dist_on_itp: false
+dist_url: 'env://'
+
+# S3 Load & Save
+s3_path: ''
+s3_save_dir: ''
