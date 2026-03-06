@@ -9,8 +9,8 @@ from omegaconf import DictConfig
 import torch
 import torch.nn as nn
 
-from src.utils.modules import Block, CrossAttention, CrossAttentionBlock
-from src.utils.tensors import trunc_normal_
+from utils.modules import Block, CrossAttention, CrossAttentionBlock
+from utils.tensors import trunc_normal_
 
 
 class AttentivePooler(nn.Module):
@@ -34,6 +34,7 @@ class AttentivePooler(nn.Module):
         attn_drop=cfg.attn_drop
         proj_drop=cfg.proj_drop
         attention_mechanism=cfg.att_pos
+        grid_size=cfg.grid_size
         self.use_activation_checkpointing = use_activation_checkpointing
         self.query_tokens = nn.Parameter(torch.zeros(1, num_queries, embed_dim))
 
@@ -43,7 +44,7 @@ class AttentivePooler(nn.Module):
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, norm_layer=norm_layer
             )
         else:
-            self.cross_attention_block = CrossAttention(dim=embed_dim, num_heads=num_heads, qkv_bias=qkv_bias)
+            self.cross_attention_block = CrossAttention(dim=embed_dim, num_heads=num_heads, qkv_bias=qkv_bias,)
 
         self.blocks = None
         if depth > 1:
@@ -59,6 +60,7 @@ class AttentivePooler(nn.Module):
                         drop=proj_drop,
                         attn_drop=attn_drop,
                         drop_path=proj_drop,
+                        grid_size=grid_size,
                         use_rope=attention_mechanism == "rope",
                     )
                     for i in range(depth - 1)

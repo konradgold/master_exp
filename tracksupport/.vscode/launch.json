@@ -19,6 +19,16 @@
             "module": "src.models",
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal"
+        },
+        {
+            "name": "Attach to debugpy (rank0)",
+            "type": "debugpy",
+            "request": "attach",
+            "justMyCode": true,
+            "connect": {
+                "host": "localhost",
+                "port": 5678
+            }
         }
     ]
 }

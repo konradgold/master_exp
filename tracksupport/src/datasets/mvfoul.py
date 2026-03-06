@@ -1,7 +1,7 @@
 from random import randint
 
 from torch.utils.data import Dataset
-from src.utils.mv_foul_parser import label2vectormerge, clips2vectormerge
+from utils.mv_foul_parser import label2vectormerge, clips2vectormerge
 import torch
 import warnings
 with warnings.catch_warnings():
@@ -9,7 +9,7 @@ with warnings.catch_warnings():
     from torchvision.io.video import read_video
 
 class MultiViewDataset(Dataset):
-    def __init__(self, path, start, end, fps, split, num_views, mode:str="TCHW", num_frames=8):
+    def __init__(self, path, start: int = 0, end: int = 125, fps: int = 25, split: str = "train", num_views: int = 5, mode:str="TCHW", num_frames=16):
 
 
         if split != 'Chall':
@@ -21,6 +21,10 @@ class MultiViewDataset(Dataset):
 
             self.weights_offence_severity = torch.div(1, self.distribution_offence_severity)
             self.weights_action = torch.div(1, self.distribution_action)
+            print(f"Distribution of offence severity in {split} set: {self.distribution_offence_severity}")
+            print(f"Distribution of action in {split} set: {self.distribution_action}")
+            print(f"Weights for offence severity in {split} set: {torch.sqrt(self.weights_offence_severity)}")
+            print(f"Weights for action in {split} set: {torch.sqrt(self.weights_action)}")
         else:
             self.clips = clips2vectormerge(path, split, num_views, [])
 
@@ -56,7 +60,7 @@ class MultiViewDataset(Dataset):
     def getDistribution(self):
         return self.distribution_offence_severity, self.distribution_action, 
     def getWeights(self):
-        return self.weights_offence_severity, self.weights_action, 
+        return torch.sqrt(self.weights_offence_severity), torch.sqrt(self.weights_action), 
 
     def __len__(self):
         return self.length
@@ -75,7 +79,7 @@ class MultiViewDataset(Dataset):
             # As the batch size during validation and testing is 1, we can 
 
 
-            final_frames = read_video(clips[index_view], start_pts=self.start, end_pts=self.end, pts_unit="sec", output_format=self.mode)[0]
+            final_frames = read_video(clips[index_view], pts_unit="sec", output_format=self.mode)[0][int(self.start):int(self.end)]
             if num_view == 0:
                 videos = final_frames.unsqueeze(0)
             else:

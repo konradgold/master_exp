@@ -1,7 +1,7 @@
 import os
 import torch
 import json
-from src.utils.mv_foul_variables import EVENT_DICTIONARY
+from utils.mv_foul_variables import EVENT_DICTIONARY
 
 def label2vectormerge(folder_path, split, num_views):
 	path_annotations = os.path.join(folder_path, split)

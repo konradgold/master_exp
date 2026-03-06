@@ -1,4 +1,4 @@
-from src.utils.tensors import batch_tensor, unbatch_tensor
+from utils.tensors import batch_tensor, unbatch_tensor
 import torch
 from torch import nn
 
@@ -100,6 +100,62 @@ class EmbedAvgAggregate(nn.Module):
         assert pooled_view.shape == (B, C)
         return pooled_view.squeeze(), x
 
+class EmbedWeightedAggregate(nn.Module):
+    def __init__(self, feat_dim):
+        super().__init__()
+
+        self.feature_dim = feat_dim
+
+        r1 = -1
+        r2 = 1
+        self.attention_weights = nn.Parameter((r1 - r2) * torch.rand(feat_dim, feat_dim) + r2)
+
+        self.normReLu = nn.Sequential(
+            nn.LayerNorm(feat_dim),
+            nn.ReLU()
+        )        
+
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        B, V, _ = x.shape # Batch, Views, Channel, 
+
+        if x.ndim == 4:
+            x = x.view(B, -1, self.feature_dim)
+            V = x.shape[1]
+        aux = x
+
+        ##################### VIEW ATTENTION #####################
+
+        # S = source length 
+        # N = batch size
+        # E = embedding dimension
+        # L = target length
+
+        aux = torch.matmul(aux, self.attention_weights)
+        # Dimension S, E for two views (2,512)
+        aux = aux.squeeze(2)
+        aux = aux / (self.feature_dim ** 0.5)
+
+        # Dimension N, S, E
+        aux_t = aux.permute(0, 2, 1)
+
+        prod = torch.bmm(aux, aux_t)
+        relu_res = self.relu(prod)
+        
+        aux_sum = torch.sum(torch.reshape(relu_res, (B, V*V)).T, dim=0).unsqueeze(0)
+        final_attention_weights = torch.div(torch.reshape(relu_res, (B, V*V)).T, aux_sum.squeeze(0))
+        final_attention_weights = final_attention_weights.T
+
+        final_attention_weights = torch.reshape(final_attention_weights, (B, V, V))
+
+        final_attention_weights = torch.sum(final_attention_weights, 1)
+
+        output = torch.mul(aux.squeeze(), final_attention_weights.unsqueeze(-1))
+
+        output = torch.sum(output, 1)
+
+        return output.squeeze(), final_attention_weights
 
 class ViewAvgAggregate(nn.Module):
     def __init__(self,  model, lifting_net=nn.Sequential()):
@@ -116,31 +172,34 @@ class ViewAvgAggregate(nn.Module):
 class EmbedMVAggregate(nn.Module):
     def __init__(self, agr_type="max", feat_dim=400, return_attention=False):
         super().__init__()
-        self.agr_type = agr_type
         self.return_attention = return_attention
 
-        if self.agr_type == "max":
+        if agr_type == "max":
             self.aggregation_model = EmbedMaxAggregate()
-        elif self.agr_type == "mean":
+        elif agr_type == "mean":
             self.aggregation_model = EmbedAvgAggregate()
+        elif agr_type == "weighted":
+            self.aggregation_model = EmbedWeightedAggregate(feat_dim=feat_dim)
         
         self.inter = nn.Sequential(
             nn.LayerNorm(feat_dim),
-            nn.Linear(feat_dim, feat_dim),
-            nn.Linear(feat_dim, feat_dim),
+            nn.Linear(feat_dim, feat_dim//2),
+            nn.ReLU(),
+            nn.Linear(feat_dim//2, feat_dim//4),
         )
 
         self.fc_offence = nn.Sequential(
-            nn.LayerNorm(feat_dim),
-            nn.Linear(feat_dim, feat_dim),
-            nn.Linear(feat_dim, 4)
+            nn.LayerNorm(feat_dim//4),
+            nn.Linear(feat_dim//4, feat_dim//8),
+            nn.ReLU(),
+            nn.Linear(feat_dim//8, 4)
         )
 
-
         self.fc_action = nn.Sequential(
-            nn.LayerNorm(feat_dim),
-            nn.Linear(feat_dim, feat_dim),
-            nn.Linear(feat_dim, 8)
+            nn.LayerNorm(feat_dim//4),
+            nn.Linear(feat_dim//4, feat_dim//8),
+            nn.ReLU(),
+            nn.Linear(feat_dim//8, 8)
         )
     
 
@@ -168,21 +227,24 @@ class MVAggregate(nn.Module):
 
         self.inter = nn.Sequential(
             nn.LayerNorm(feat_dim),
-            nn.Linear(feat_dim, feat_dim),
-            nn.Linear(feat_dim, feat_dim),
+            nn.Linear(feat_dim, feat_dim//2),
+            nn.GELU(),
+            nn.Linear(feat_dim//2, feat_dim),
         )
 
         self.fc_offence = nn.Sequential(
             nn.LayerNorm(feat_dim),
-            nn.Linear(feat_dim, feat_dim),
-            nn.Linear(feat_dim, 4)
+            nn.Linear(feat_dim, feat_dim//2),
+            nn.GELU(),
+            nn.Linear(feat_dim//2, 4)
         )
 
 
         self.fc_action = nn.Sequential(
             nn.LayerNorm(feat_dim),
-            nn.Linear(feat_dim, feat_dim),
-            nn.Linear(feat_dim, 8)
+            nn.Linear(feat_dim, feat_dim//2),
+            nn.GELU(),
+            nn.Linear(feat_dim//2, 8)
         )
 
         if self.agr_type == "max":

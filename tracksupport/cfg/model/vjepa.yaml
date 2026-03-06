@@ -1,0 +1,28 @@
+# @package _global_
+#
+# V-JEPA model configuration.
+# Selected via: torchrun ... src/runs/train.py model=vjepa
+
+model_type: vjepa
+
+model_hf: facebook/vjepa2-vith-fpc64-256
+max_track_tokens: 10
+hpatches: 16
+wpatches: 16
+num_heads: 2
+embedding_dim: 1280
+window_decay: 0.5
+num_frames: 64
+track_model: rtdetr-l.pt
+patch_number: 16
+use_sdpa: true
+
+# LoRA adapter configuration for the V-JEPA encoder.
+# Adapters are only trained during "pretrain" phases.
+lora:
+  r: 16
+  alpha: 32
+  init_weights: true
+
+TrackTransformer:
+  num_layers: 2

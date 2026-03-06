@@ -2,9 +2,6 @@ import torch.nn as nn
 import torch
 from omegaconf import DictConfig
 from ultralytics import RTDETR
-import hydra
-from torchvision.io import read_video
-from transformers import AutoVideoProcessor
 
 class Tracker(nn.Module):
     def __init__(self, cfg: DictConfig):
@@ -32,7 +29,7 @@ class Tracker(nn.Module):
     def forward(self, x: torch.Tensor):
         B, T, H, W, C = x.shape
         out = torch.zeros(B, self.num_frames, self.max_track_tokens, self.embedding_dim, device=x.device)
-        all_tracks = None
+        all_tracks = []
         all_frames = []
         for b in range(B):
             tracks, frames = self._find_tracks(x[b])
@@ -40,17 +37,20 @@ class Tracker(nn.Module):
             # Contract: at track t, the number is either the patch index (0 to num_patches-1, t = i*self.hpatches + j) or -1 for padding
             if tracks.ndim == 2:
                 tracks = tracks.unsqueeze(0)  # Add batch dimension if missing
-            all_tracks = tracks if all_tracks is None else torch.cat((all_tracks, tracks), dim=0)
+            all_tracks.append(tracks)
 
             valid_mask = tracks >= 0
             valid_tracks = tracks[valid_mask]
             assert valid_tracks.max() < self.num_patches, f"Track index {valid_tracks.max()} is out of bounds for {self.num_patches} patches"
-            out[b, valid_mask.squeeze()] = self.positional_embedding[valid_tracks.long()]
+            out[b][valid_mask.squeeze()] = self.positional_embedding[valid_tracks.long()]
             
-        return out, all_tracks, all_frames
+        return out, torch.cat(all_tracks, dim=0), all_frames
 
     def _find_tracks(self, x: torch.Tensor):
         T, C, H, W = x.shape
+        if hasattr(self.tracker, 'predictor') and hasattr(self.tracker.predictor, 'trackers'):
+            for t in self.tracker.predictor.trackers:
+                t.reset()
         results = self.tracker.track(
                 source=x,
                 tracker="bytetrack.yaml",
@@ -58,9 +58,9 @@ class Tracker(nn.Module):
                 stream=True,
                 verbose=False,
             )
-        centers = []
-        track_first = {}
-        track_last = {}
+        
+        track_lifetimes = {}
+        frame_detections = {t: [] for t in range(T)}
 
         for frame_idx, r in enumerate(results):
             boxes = r.boxes
@@ -74,10 +74,6 @@ class Tracker(nn.Module):
             for tid, (cxn, cyn, w_n, h_n) in zip(ids, xywhn):
                 tid = int(tid)
 
-                # lifetime
-                if tid not in track_first:
-                    track_first[tid] = frame_idx
-                track_last[tid] = frame_idx
 
                 # normalized center directly
                 w_id = int(cxn*self.wpatches) if int(cxn*self.wpatches) < self.wpatches else self.wpatches - 1
@@ -85,68 +81,68 @@ class Tracker(nn.Module):
                 h_id = int(cyn*self.hpatches) if int(cyn*self.hpatches) < self.hpatches else self.hpatches - 1
                 assert h_id < self.hpatches, f"Calculated patch index {h_id} is out of bounds for {self.hpatches} patches"
 
-                centers.append((frame_idx, tid, h_id * self.wpatches + w_id))
+                pid = h_id * self.wpatches + w_id
 
-        lifetimes = {
-            tid: track_last[tid] - track_first[tid] + 1
-            for tid in track_first.keys()
-        }
+                frame_detections[frame_idx].append((tid, pid))
+                track_lifetimes[tid] = track_lifetimes.get(tid, 0) + 1
 
-        # sort by lifetime descending
-        longest = sorted(lifetimes.items(), key=lambda kv: kv[1], reverse=True)
+        longest_tids = sorted(track_lifetimes.keys(), key=lambda t: track_lifetimes[t], reverse=True)
 
+        top_tids = longest_tids[:self.max_track_tokens]
+        tid_to_idx = {tid: idx for idx, tid in enumerate(top_tids)}
+
+        valid_frames = [f for f in range(T) if any(t[0] in tid_to_idx for t in frame_detections[f])]
+
+        frames = self._select_frames(valid_frames, self.num_frames, len(valid_frames), T)
+
+        result_tensor = torch.full((self.num_frames, self.max_track_tokens), -1, dtype=torch.long, device=x.device)
+
+        for out_f_idx, f_idx in enumerate(frames):
+            for tid, pid in frame_detections[f_idx]:
+                if tid in tid_to_idx:
+                    slot_idx = tid_to_idx[tid]
+                    result_tensor[out_f_idx, slot_idx] = pid
         
-        centers_tid = dict()
-        early_longest = 0
-        latest_longest = len(centers)
+        assert result_tensor.shape == (self.num_frames, self.max_track_tokens), f"Expected result tensor shape {(self.num_frames, self.max_track_tokens)}, got {result_tensor.shape}"
+        assert len(frames) == self.num_frames, f"Expected {self.num_frames} frames, got {len(frames)}"
 
 
-        longest_trace = longest[0][1] if longest else 0
-        for tid, length in longest[:self.max_track_tokens]:
-            if track_first[tid] > early_longest and track_first[tid] < (T-self.num_frames)//2:
-                early_longest = track_first[tid]
-            if track_last[tid] < latest_longest and length > longest_trace//3 and track_last[tid] > (T + self.num_frames)//2:
-                latest_longest = track_last[tid]
-
-        if latest_longest - early_longest < self.num_frames*1.5:
-            if T - latest_longest < early_longest:
-                early_longest = max(0, latest_longest - self.num_frames*1.5)
-            if latest_longest - early_longest < self.num_frames*1.5:
-                latest_longest = min(T-1, early_longest + self.num_frames*1.5)
-        else:
-            early_longest = max(0, latest_longest - self.num_frames*1.5)
-
-        centers_tid = dict()
-
-        while len(centers_tid) <= self.num_frames:
-            centers_tid = dict()
-            centers_limit=[center for center in centers if center[0] >= early_longest and center[0] <= latest_longest]
-            for tid, length in longest[:self.max_track_tokens]:
-                for frame_idx, t, pid in centers_limit:
-                    if tid == t:
-                        centers_tid.setdefault(frame_idx, []).append((tid, pid))
-            early_longest = max(0, early_longest-1)
-            latest_longest = min(T-1, latest_longest+1)
-        if len(centers_tid) <= self.num_frames:
-            raise ValueError(f"Could not find enough tracks within the frame limit. Found {len(centers_tid)} frames with tracks, but need at least {self.num_frames}. Consider adjusting the frame limit or tracking parameters.")
-        
-        for frame_idx, tracks in centers_tid.items():
-            centers_tid[frame_idx] = []
-            for i, (tid, pid) in enumerate(sorted(tracks, key=lambda x: x[0])):
-                centers_tid[frame_idx].append((i, pid))
-        
-        
-        frames = sorted(list(centers_tid.keys()))
-        if len(frames) > self.num_frames:
-            # evenly spaced frames
-            indices = torch.linspace(0, len(frames) - 1, self.num_frames).long()
-            frames = [frames[i] for i in indices]
-            
-        result_tensor = torch.ones(len(frames), self.max_track_tokens, device=x.device) * -1
-        
-        for frame_idx in frames:
-            for (idx, pid) in centers_tid[frame_idx]:
-                assert pid < self.num_patches, f"Patch index {pid} is out of bounds for {self.num_patches} patches"
-                result_tensor[frames.index(frame_idx), idx] = pid
-        
         return result_tensor, frames
+
+    
+    def _select_frames(self, valid_frames, N, V, T):
+        if V == 0:
+            # Fallback: no tracks found at all, sample evenly across the whole video
+            frames = torch.linspace(0, T - 1, N).long().tolist()
+
+        elif V > N:
+            # We have MORE valid frames than needed. Time to downsample.
+            t_split = T // 3
+            early_pool = [f for f in valid_frames if f < t_split]
+            late_pool = [f for f in valid_frames if f >= t_split]
+            
+            if len(late_pool) >= N:
+                # 100% of frames come from the last 2/3 of the video
+                indices = torch.linspace(0, len(late_pool) - 1, N).long()
+                frames = [late_pool[i] for i in indices]
+            else:
+                # Keep all available late frames, pad the rest from the early pool
+                missing = N - len(late_pool)
+                indices = torch.linspace(0, len(early_pool) - 1, missing).long()
+                early_frames = [early_pool[i] for i in indices]
+                
+                # early_frames are already smaller than late_pool frames, so appending maintains sorted order
+                frames = early_frames + late_pool 
+        else:
+            # V <= N: We don't have enough tracked frames. Keep them all and pad.
+            frames = valid_frames
+            missing = N - V
+            if missing > 0:
+                available = [f for f in range(T) if f not in frames]
+                # Pad by sampling evenly from the remaining untracked frames
+                pad_indices = torch.linspace(0, len(available) - 1, missing).long()
+                frames += [available[i] for i in pad_indices]
+                frames = sorted(frames)
+        return frames
+
+

@@ -1,23 +1,10 @@
 defaults:
+  - model: vjepa          # switch to mvit via: model=mvit
   - modules: attentive_pooler
   - training: default
   - _self_
 
-
-max_track_tokens: 10
-hpatches: 16
-wpatches: 16
-num_heads: 8
-embedding_dim: 1024
-window_decay: 0.5
-num_frames: 64
-track_model: rtdetr-l.pt
-patch_number: 16
-use_sdpa: true
-model_hf: facebook/vjepa2-vitl-fpc64-256
-agr_type: max
+num_gpus: 4
+agr_type: weighted
 return_attention: false
-
-TrackTransformer:
-  num_layers: 2
 

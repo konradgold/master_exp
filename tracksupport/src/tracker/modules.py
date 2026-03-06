@@ -2,7 +2,6 @@ import torch.nn as nn
 import torch
 from omegaconf import DictConfig
 from positional_encodings.torch_encodings import PositionalEncoding1D
-from src.tracker.basic_tracker import Tracker
 
 
 class AttentionalSampler(nn.Module):
@@ -25,7 +24,7 @@ class AttentionalSampler(nn.Module):
         B, T, M, D = t.shape
         B, T, H, W, D = mv.shape
         assert M == self.max_track_tokens, f"Expected {self.max_track_tokens} track tokens, got {M}"
-        
+        assert D == self.embedding_dim, f"Expected embedding dimension {self.embedding_dim}, got {D}"
 
         q = self.q(t)
         k = self.k(mv)

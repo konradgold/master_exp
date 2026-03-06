@@ -1,21 +1,46 @@
 wandb:
-  enable: true
+  enable: false
   project: "Thesis-Goldenbaum"
   entity: "konradgoldenbaum-hasso-plattner-institut"
   run_name: mvfoul_scratch_run
-  log_frequency: 50  # log every N iterations
+  log_frequency: 10  # log every N iterations
 
 data_path: /sc/home/konrad.goldenbaum/data/SoccerData/mvfouls
 
-epochs: 50
-train_batch_size: 2
+epochs: 100
+train_batch_size: 8
 val_batch_size: 1
-lr: 1e-4
-weight_decay: 1e-2
+lr: 5e-4
+min_lr: 1e-5
+warmup_start_lr: 1e-4
+warmup_epochs: 15
+weight_decay: 0.01
 num_views: 2
 start_frame: 0.0
-end_frame: 4.0
+end_frame: 125.0
 fps: 25
-num_workers: 4
-grad_accum_steps: 1
-label_smoothing: 0.1
+num_workers: 8
+grad_accum_steps: 4
+label_smoothing: 0.0
+eval_every_n_epochs: 10
+phase: train
+
+# Multi-phase training schedule
+# Each entry: [start_epoch, phase, lr]
+# Phases: "train" = frozen backbone, "pretrain" = unfrozen backbone
+phase_schedule:
+  enable: true
+  transition_epochs: 5 # Epochs at which to transition phases
+  schedule:
+    - [1, "train", 1e-3]       # Epochs 1-15: train head only
+    - [16, "pretrain", 3e-5]   # Epochs 16-35: fine-tune everything  
+    - [36, "train", 1e-4]      # Epochs 36+: freeze backbone again
+
+resume_checkpoint:
+  enable: false
+  path: checkpoints/last_checkpoint_3.pt
+
+debug: 
+  enable: true
+  size: 64
+
