@@ -2,3 +2,7 @@ outputs
 wandb
 *.pyc
 *.pt
+checkpoints
+*.log
+*.egg*
+fuse_output.txt
