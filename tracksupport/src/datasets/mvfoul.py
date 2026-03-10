@@ -21,10 +21,6 @@ class MultiViewDataset(Dataset):
 
             self.weights_offence_severity = torch.div(1, self.distribution_offence_severity)
             self.weights_action = torch.div(1, self.distribution_action)
-            print(f"Distribution of offence severity in {split} set: {self.distribution_offence_severity}")
-            print(f"Distribution of action in {split} set: {self.distribution_action}")
-            print(f"Weights for offence severity in {split} set: {torch.sqrt(self.weights_offence_severity)}")
-            print(f"Weights for action in {split} set: {torch.sqrt(self.weights_action)}")
         else:
             self.clips = clips2vectormerge(path, split, num_views, [])
 
@@ -60,7 +56,16 @@ class MultiViewDataset(Dataset):
     def getDistribution(self):
         return self.distribution_offence_severity, self.distribution_action, 
     def getWeights(self):
-        return torch.sqrt(self.weights_offence_severity), torch.sqrt(self.weights_action), 
+        return torch.sqrt(self.weights_offence_severity), torch.sqrt(self.weights_action),
+
+    def weights(self, mode="action"):
+        if mode == "action":
+            return torch.tensor([torch.sqrt(self.weights_action[torch.argmax(label)]).item() for label in self.labels_action])
+        elif mode == "offence":
+            return torch.tensor([torch.sqrt(self.weights_offence_severity[torch.argmax(label)]).item() for label in self.labels_offence_severity])
+        else:
+            raise ValueError("Mode must be either 'action' or 'offence'")
+
 
     def __len__(self):
         return self.length

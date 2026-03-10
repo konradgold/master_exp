@@ -169,6 +169,45 @@ class ViewAvgAggregate(nn.Module):
         pooled_view = torch.mean(aux, dim=1)
         return pooled_view.squeeze(), aux
     
+class ShallowMVAggregate(nn.Module):
+    def __init__(self, agr_type="max", feat_dim=400, return_attention=False):
+        super().__init__()
+        self.agr_type = agr_type
+        self.return_attention = return_attention
+
+        if self.agr_type == "max":
+            self.aggregation_model = EmbedMaxAggregate()
+        elif self.agr_type == "mean":
+            self.aggregation_model = EmbedAvgAggregate()
+        else:
+            self.aggregation_model = EmbedWeightedAggregate(feat_dim=feat_dim)
+        
+        self.fc_offence = nn.Sequential(
+            nn.LayerNorm(feat_dim),
+            nn.Linear(feat_dim, 4)
+        )
+
+        self.fc_action = nn.Sequential(
+            nn.LayerNorm(feat_dim),
+            nn.Linear(feat_dim, 8)
+        )
+    
+    def forward(self, mvimages):
+        pooled_view, attention = self.aggregation_model(mvimages)
+
+        pred_action = self.fc_action(pooled_view)
+        pred_offence_severity = self.fc_offence(pooled_view)
+
+        if pred_action.ndim == 1:
+            pred_action = pred_action.unsqueeze(0)
+        if pred_offence_severity.ndim == 1:
+            pred_offence_severity = pred_offence_severity.unsqueeze(0)
+
+        if self.return_attention:
+            return pred_action, pred_offence_severity, attention
+        else:
+            return pred_action, pred_offence_severity
+    
 class EmbedMVAggregate(nn.Module):
     def __init__(self, agr_type="max", feat_dim=400, return_attention=False):
         super().__init__()
@@ -269,3 +308,15 @@ class MVAggregate(nn.Module):
             return pred_action, pred_offence_severity, attention
         else:
             return pred_action, pred_offence_severity
+
+
+HEAD_REGISTRY = {
+    "shallow_mv_aggregate": ShallowMVAggregate,
+    "embed_mv_aggregate": EmbedMVAggregate,
+}
+
+def get_head(model,agr_type="max", feat_dim=400, return_attention=False):
+    if model in HEAD_REGISTRY:
+        return HEAD_REGISTRY[model](agr_type=agr_type, feat_dim=feat_dim, return_attention=return_attention)
+    else:
+        raise ValueError(f"Unknown model: {model}")

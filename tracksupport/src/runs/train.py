@@ -13,6 +13,8 @@ import logging
 import math
 import os
 
+import ignite
+
 # --- SLURM environment variable stripping ---
 for key in list(os.environ.keys()):
     if key.startswith("SLURM_"):
@@ -27,23 +29,24 @@ import ignite.distributed as idist
 from omegaconf import DictConfig, OmegaConf
 
 from ignite.engine import Engine, Events
-from ignite.metrics import RunningAverage, Loss, Accuracy, ConfusionMatrix
-from ignite.handlers import Checkpoint, ModelCheckpoint
+from ignite.metrics import RunningAverage
+from ignite.handlers import Checkpoint, FastaiLRFinder, ModelCheckpoint
 from ignite.contrib.handlers import ProgressBar, WandBLogger
 from ignite.utils import setup_logger
 
 import matplotlib
 matplotlib.use("Agg")
 
-from runs.train_utils import BalancedAccuracy, plot_lr_schedule_with_phases
+from runs.train_utils import _maybe_fuse_checkpoint, calculate_weights, plot_lr_schedule_with_phases, _build_metrics, _get_class_weights
 from models import build_model
 from datasets.mvfoul import MultiViewDataset
 
 import debugpy
 
 if os.getenv("LOCAL_RANK", "0") == "0" and False:  # only rank 0
-    debugpy.listen(("0.0.0.0", 5678))
-    print("Waiting for debugger attach on port 5678...")
+    port = 5670
+    debugpy.listen(("0.0.0.0", port))
+    print(f"Waiting for debugger attach on port {port}...")
     debugpy.wait_for_client()
     debugpy.breakpoint()
 # ------------------------------------------------------------------ #
@@ -62,7 +65,7 @@ def _train_step_fn(model, optimizer, criterion_action, criterion_offence,
         labels_action = labels_action.to(device, non_blocking=True).squeeze(1)
         labels_offence = labels_offence.to(device, non_blocking=True).squeeze(1)
 
-        pred_action, pred_offence, _ = model(videos)
+        pred_action, pred_offence, aux = model(videos)
 
         loss_action = criterion_action(pred_action, labels_action)
         loss_offence = criterion_offence(pred_offence, labels_offence)
@@ -74,7 +77,7 @@ def _train_step_fn(model, optimizer, criterion_action, criterion_offence,
             optimizer.step()
             optimizer.zero_grad()
 
-        return {
+        output = {
             "loss": loss,
             "loss_action": loss_action,
             "loss_offence": loss_offence,
@@ -83,6 +86,14 @@ def _train_step_fn(model, optimizer, criterion_action, criterion_offence,
             "y_pred_offence": pred_offence,
             "y_offence": labels_offence,
         }
+
+        if aux is not None and isinstance(aux, torch.Tensor) and aux.ndim == 3:
+             output["interp_scores_mean"] = aux.mean().item()
+             output["interp_scores_std"] = aux.std().item()
+             output["interp_scores_min"] = aux.min().item()
+             output["interp_scores_max"] = aux.max().item()
+        
+        return output
 
     return _step
 
@@ -117,89 +128,19 @@ def _val_step_fn(model, criterion_action, criterion_offence, device):
 
     return _step
 
-
-# ------------------------------------------------------------------ #
-# Metrics helpers                                                      #
-# ------------------------------------------------------------------ #
-
-def _output_transform_act(output):
-    logits = output["y_pred_action"]       # [B, 8]
-    y_true_oh = output["y_action"]         # [B, 8] one-hot
-
-    assert logits.shape[0] == y_true_oh.shape[0], "Batch size mismatch"
-    assert logits.shape[1] == 8 and y_true_oh.shape[1] == 8
-
-    preds_oh = torch.zeros_like(logits)
-    preds_oh.scatter_(1, logits.argmax(dim=1, keepdim=True), 1.0)
-    return preds_oh, y_true_oh.argmax(dim=1)
-
-
-def _output_transform_off(output):
-    logits = output["y_pred_offence"]      # [B, 4]
-    y_true_oh = output["y_offence"]        # [B, 4] one-hot
-
-    assert logits.shape[0] == y_true_oh.shape[0], "Batch size mismatch"
-    assert logits.shape[1] == 4 and y_true_oh.shape[1] == 4
-
-    preds_oh = torch.zeros_like(logits)
-    preds_oh.scatter_(1, logits.argmax(dim=1, keepdim=True), 1.0)
-    return preds_oh, y_true_oh.argmax(dim=1)
-
-
-def _build_metrics():
-    """Create one fresh metric dict (attach to an evaluator engine)."""
-    return {
-        "loss": Loss(lambda x, y: x["loss"], output_transform=lambda x: (x, x)),
-        "acc_action": Accuracy(output_transform=_output_transform_act),
-        "acc_offence": Accuracy(output_transform=_output_transform_off),
-        "bal_acc_action": BalancedAccuracy(n_classes=8, output_transform=_output_transform_act),
-        "bal_acc_offence": BalancedAccuracy(n_classes=4, output_transform=_output_transform_off),
-        "cm_action": ConfusionMatrix(num_classes=8, output_transform=_output_transform_act),
-        "cm_offence": ConfusionMatrix(num_classes=4, output_transform=_output_transform_off),
-    }
-
-
-# ------------------------------------------------------------------ #
-# Class-weight extraction                                              #
-# ------------------------------------------------------------------ #
-
-def _get_class_weights(train_dataset, device, logger, debug_mode):
-    """Extract and sqrt-dampen class weights from the dataset."""
-    if debug_mode:
-        logger.info("Debug mode: using unweighted loss for overfitting test")
-        return None, None
-
-    w_action = w_offence = None
-    try:
-        base = (train_dataset.dataset
-                if isinstance(train_dataset, torch.utils.data.Subset)
-                else train_dataset)
-        if hasattr(base, "weights_action"):
-            w_action = torch.sqrt(base.weights_action).to(device).float()
-            w_action = torch.clamp(w_action, max=50.0)
-        if hasattr(base, "weights_offence_severity"):
-            w_offence = torch.sqrt(base.weights_offence_severity).to(device).float()
-            w_offence = torch.clamp(w_offence, max=50.0)
-        if w_action is not None:
-            logger.info(f"Class weights action  (sqrt-dampened): {w_action}")
-            logger.info(f"Class weights offence (sqrt-dampened): {w_offence}")
-    except Exception as e:
-        logger.warning(f"Failed to load class weights: {e}")
-    return w_action, w_offence
-
-
 # ------------------------------------------------------------------ #
 # Unified LR manager                                                   #
 # ------------------------------------------------------------------ #
 
 def _setup_lr_manager(trainer, optimizer, tcfg, steps_per_epoch, total_steps,
-                      model, logger):
+                      model, logger, train_loader):
     """
     Attach handlers for warmup + piecewise cosine + phase transitions.
 
     Phase transitions optionally switch ``model.phase`` (if the model
     supports the attribute) and cosine-interpolate the LR to a new
     target value.
+    Also supports changing batch size at phase transitions.
     """
     min_lr = tcfg.get("min_lr", 0.0)
     warmup_epochs = tcfg.get("warmup_epochs", 0)
@@ -208,14 +149,18 @@ def _setup_lr_manager(trainer, optimizer, tcfg, steps_per_epoch, total_steps,
 
     # Phase-transition lookup
     phase_schedule = tcfg.get("phase_schedule", None)
-    phase_transitions = {}               # epoch -> (phase_name, target_lr)
-    transition_steps = 0
+    phase_transitions = {}               # epoch -> (phase_name, target_lr, target_bs)
+    initial_transition_steps = 0
     if phase_schedule is not None and phase_schedule.enable:
         transition_epochs = phase_schedule.get("transition_epochs", 1)
-        transition_steps = max(1, int(transition_epochs * steps_per_epoch))
+        initial_transition_steps = max(1, int(transition_epochs * steps_per_epoch))
         for entry in phase_schedule.schedule:
-            epoch, phase, lr = int(entry[0]), str(entry[1]), float(entry[2])
-            phase_transitions[epoch] = (phase, lr)
+            if len(entry) >= 4:
+                epoch, phase, lr, batch_size = int(entry[0]), str(entry[1]), float(entry[2]), int(entry[3])
+            else:
+                epoch, phase, lr = int(entry[0]), str(entry[1]), float(entry[2])
+                batch_size = None
+            phase_transitions[epoch] = (phase, lr, batch_size)
 
     # Mutable state for the cosine segment & phase transitions
     _cos = {
@@ -223,7 +168,14 @@ def _setup_lr_manager(trainer, optimizer, tcfg, steps_per_epoch, total_steps,
         "t_max": max(1, total_steps - warmup_steps),
         "elapsed": 0,
     }
-    _trans = {"active": False, "start_lr": 0.0, "end_lr": 0.0, "elapsed": 0}
+    _trans = {
+        "active": False, 
+        "start_lr": 0.0, 
+        "end_lr": 0.0, 
+        "elapsed": 0,
+        "steps": initial_transition_steps
+    }
+    _epoch_state = {"step": 0}
 
     def _cosine_lr(anchor, elapsed, t_max):
         return min_lr + 0.5 * (anchor - min_lr) * (
@@ -232,10 +184,13 @@ def _setup_lr_manager(trainer, optimizer, tcfg, steps_per_epoch, total_steps,
 
     @trainer.on(Events.EPOCH_STARTED)
     def check_phase_switch(engine):
+        # Always reset step counter at start of epoch
+        _epoch_state["step"] = 0
+        
         epoch = engine.state.epoch
         if epoch not in phase_transitions:
             return
-        new_phase, new_lr = phase_transitions[epoch]
+        new_phase, new_lr, new_bs = phase_transitions[epoch]
         raw_model = model.module if hasattr(model, "module") else model
 
         # Switch model phase if supported
@@ -243,41 +198,79 @@ def _setup_lr_manager(trainer, optimizer, tcfg, steps_per_epoch, total_steps,
         if hasattr(raw_model, "phase"):
             old_phase = raw_model.phase
             raw_model.phase = new_phase
+        
+        # Switch Batch Size if requested
+        bs_msg = ""
+        if new_bs is not None:
+            world_size = idist.get_world_size() 
+            target_bs = new_bs * world_size
+            
+            if hasattr(train_loader, "batch_sampler") and hasattr(train_loader.batch_sampler, "batch_size"):
+                old_bs = train_loader.batch_sampler.batch_size
+                train_loader.batch_sampler.batch_size = target_bs
+                bs_msg = f" | BS {old_bs}->{target_bs} (Base: {new_bs})"
+            else:
+                bs_msg = f" | WARNING: Could not set batch size to {target_bs}, loader missing batch_sampler.batch_size"
 
         current_lr = optimizer.param_groups[0]["lr"]
+        
+        # Recalculate transition steps based on current steps per epoch
+        tr_epochs = phase_schedule.get('transition_epochs', 1)
+        curr_steps = len(train_loader)
+        
+        # IMPORTANT: Update engine.state.epoch_length so ProgressBar and other handlers see the new length
+        engine.state.epoch_length = curr_steps
+        
         _trans.update(active=True, start_lr=current_lr,
-                      end_lr=new_lr, elapsed=0)
+                      end_lr=new_lr, elapsed=0,
+                      steps=max(1, int(tr_epochs * curr_steps)))
 
         trainable = sum(p.numel() for p in raw_model.parameters()
                         if p.requires_grad)
-        phase_msg = (f"Phase '{old_phase}' -> '{new_phase}' | "
+        phase_msg = (f"Phase '{old_phase}' -> '{new_phase}'"
                      if old_phase is not None else "")
         logger.info(
             f"Epoch {epoch}: {phase_msg}"
-            f"LR {current_lr:.2e} -> {new_lr:.2e} over "
-            f"{phase_schedule.get('transition_epochs', 1)} epoch(s) | "
+            f" | LR {current_lr:.2e} -> {new_lr:.2e}"
+            f"{bs_msg} | steps_per_epoch={curr_steps} | "
             f"Trainable params: {trainable:,}"
         )
 
     @trainer.on(Events.ITERATION_STARTED)
     def manage_lr(engine):
         step = engine.state.iteration - 1
-
+        
+        # Logic update: Use epoch-based progress for warmup to handle dynamic SPE
+        curr_epoch_idx = engine.state.epoch - 1
+        
         # 1. Warmup
-        if step < warmup_steps:
-            alpha = step / max(warmup_steps, 1)
-            lr = warmup_start_lr + alpha * (float(tcfg.lr) - warmup_start_lr)
+        if curr_epoch_idx < warmup_epochs:
+            current_spe = len(train_loader)
+            progress_in_epoch = _epoch_state["step"] / max(1, current_spe)
+            # fraction of total warmup time
+            total_warmup_progress = (curr_epoch_idx + progress_in_epoch) / max(1, warmup_epochs)
+            lr = warmup_start_lr + total_warmup_progress * (float(tcfg.lr) - warmup_start_lr)
+
         # 2. Active phase transition
         elif _trans["active"]:
             e = _trans["elapsed"]
-            if e >= transition_steps:
+            t_steps = _trans["steps"]
+            if e >= t_steps:
                 lr = _trans["end_lr"]
                 _trans["active"] = False
+                
+                # Recalculate t_max for next cosine phase
+                curr_steps = len(train_loader)
+                rem_epochs = tcfg.epochs - engine.state.epoch
+                cur_in_epoch = (engine.state.iteration - 1) % curr_steps
+                rem_in_epoch = max(0, curr_steps - cur_in_epoch - 1)
+                future_steps = rem_epochs * curr_steps + rem_in_epoch
+                
                 _cos["anchor"] = lr
-                _cos["t_max"] = max(1, total_steps - step)
+                _cos["t_max"] = max(1, future_steps)
                 _cos["elapsed"] = 0
             else:
-                cos_a = 0.5 * (1.0 - math.cos(math.pi * e / transition_steps))
+                cos_a = 0.5 * (1.0 - math.cos(math.pi * e / t_steps))
                 lr = _trans["start_lr"] + cos_a * (_trans["end_lr"] - _trans["start_lr"])
                 _trans["elapsed"] += 1
         # 3. Normal cosine decay
@@ -287,33 +280,10 @@ def _setup_lr_manager(trainer, optimizer, tcfg, steps_per_epoch, total_steps,
 
         for pg in optimizer.param_groups:
             pg["lr"] = lr
+        
+        _epoch_state["step"] += 1
 
 
-# ------------------------------------------------------------------ #
-# Checkpoint fusion helper                                             #
-# ------------------------------------------------------------------ #
-
-def _maybe_fuse_checkpoint(model, checkpoint_path, local_rank):
-    """Fuse the model's BN layers if the checkpoint was saved in fused form."""
-    resume_abs_path = hydra.utils.to_absolute_path(checkpoint_path)
-    if not os.path.exists(resume_abs_path):
-        return
-    try:
-        chkpt = torch.load(resume_abs_path, map_location="cpu")
-        sd = chkpt.get("model", chkpt)
-        fused_key = "tracker.tracker.model.model.0.stem1.conv.bias"
-        unfused_key = "tracker.tracker.model.model.0.stem1.bn.weight"
-        if (fused_key in sd) and (unfused_key not in sd):
-            print(f"[Rank {local_rank}] Detected FUSED checkpoint. "
-                  "Fusing model to match...")
-            tracker = getattr(model, "tracker", None)
-            if (tracker
-                    and hasattr(tracker, "tracker")
-                    and hasattr(tracker.tracker, "fuse")):
-                model.tracker.tracker.fuse()
-                print(f"[Rank {local_rank}] Model fused successfully.")
-    except Exception as e:
-        print(f"[Rank {local_rank}] Warning: pre-check of checkpoint failed: {e}")
 
 
 # ------------------------------------------------------------------ #
@@ -329,6 +299,8 @@ def _setup_wandb(tcfg, cfg, trainer, evaluator, train_evaluator, optimizer):
     print(f"[Rank {local_rank}] Configuring WandB...")
     if idist.get_rank() == 0:
         print(f"[Rank {local_rank}] Initializing WandB Logger...")
+    else:
+        return  # only rank 0 should initialize the logger to avoid duplicates
 
     wandb_logger = WandBLogger(
         project=tcfg.wandb.project,
@@ -344,9 +316,11 @@ def _setup_wandb(tcfg, cfg, trainer, evaluator, train_evaluator, optimizer):
         event_name=Events.ITERATION_COMPLETED(every=tcfg.wandb.log_frequency),
         tag="train",
         output_transform=lambda x: {
-            "loss": x["loss"],
-            "loss_action": x["loss_action"],
-            "loss_offence": x["loss_offence"],
+            k: v for k, v in x.items() if k in {
+                "loss", "loss_action", "loss_offence",
+                "interp_scores_mean", "interp_scores_std",
+                "interp_scores_min", "interp_scores_max"
+            }
         },
     )
     wandb_logger.attach_output_handler(
@@ -415,9 +389,16 @@ def run_training(local_rank: int, cfg: DictConfig):
                 val_dataset, torch.randperm(len(val_dataset))[:subset_size])
         print(f"[Rank {local_rank}] Debug mode: "
               f"Train={len(train_dataset)}, Val={len(val_dataset)}")
-
+        
+    if tcfg.use_weighted_sampler:
+        sampler = ignite.distributed.auto.DistributedProxySampler(
+            torch.utils.data.WeightedRandomSampler(weights=calculate_weights(train_dataset), num_samples=len(train_dataset), replacement=True),
+            rank=idist.get_rank(), num_replicas=idist.get_world_size())
+    else:
+        sampler = None
     train_loader = idist.auto_dataloader(
-        train_dataset, batch_size=tcfg.train_batch_size*idist.get_world_size(), shuffle=True,
+        train_dataset, batch_size=tcfg.train_batch_size*idist.get_world_size(), shuffle=(sampler is None),
+        sampler=sampler,
         num_workers=tcfg.num_workers, pin_memory=True, drop_last=True,
     )
     val_loader = idist.auto_dataloader(
@@ -432,8 +413,8 @@ def run_training(local_rank: int, cfg: DictConfig):
     print(f"[Rank {local_rank}] Model initialized and moved to device.")
 
     # Checkpoint fusion check
-    if tcfg.resume_checkpoint.enable and tcfg.resume_checkpoint.path:
-        _maybe_fuse_checkpoint(model, tcfg.resume_checkpoint.path, local_rank)
+    if tcfg.checkpoint.resume and tcfg.checkpoint.resume_from:
+        _maybe_fuse_checkpoint(model, tcfg.checkpoint.resume_from, local_rank)
 
     # DDP wrapping
     print(f"[Rank {local_rank}] Wrapping model with idist.auto_model...")
@@ -458,9 +439,9 @@ def run_training(local_rank: int, cfg: DictConfig):
     w_action, w_offence = _get_class_weights(
         train_dataset, device, logger, tcfg.debug.enable)
     criterion_action = nn.CrossEntropyLoss(
-        weight=w_action, label_smoothing=tcfg.label_smoothing)
+        weight=w_action if not tcfg.use_weighted_sampler else None, label_smoothing=tcfg.label_smoothing)
     criterion_offence = nn.CrossEntropyLoss(
-        weight=w_offence, label_smoothing=tcfg.label_smoothing)
+        weight=w_offence if not tcfg.use_weighted_sampler else None, label_smoothing=tcfg.label_smoothing)
 
     # ---- Engines -----------------------------------------------------
     grad_accum_steps = tcfg.get("grad_accum_steps", 1)
@@ -487,8 +468,9 @@ def run_training(local_rank: int, cfg: DictConfig):
         trainer, "loss_offence")
 
     # ---- LR schedule -------------------------------------------------
-    _setup_lr_manager(
-        trainer, optimizer, tcfg, steps_per_epoch, total_steps, model, logger)
+    if not tcfg.fastai_lr.enable:
+        _setup_lr_manager(
+            trainer, optimizer, tcfg, steps_per_epoch, total_steps, model, logger, train_loader)
 
     # ---- Progress bars -----------------------------------------------
     pbar = ProgressBar(persist=True)
@@ -515,6 +497,9 @@ def run_training(local_rank: int, cfg: DictConfig):
             f"Bal Act: {m['bal_acc_action']:.4f} | "
             f"Bal Off: {m['bal_acc_offence']:.4f}"
         )
+        if idist.get_rank() == 0:
+            print(f"Confusion Matrix Action:\n{m['cm_action']}")
+            print(f"Confusion Matrix Offence:\n{m['cm_offence']}")
 
     @evaluator.on(Events.EPOCH_COMPLETED)
     def log_validation_results(engine):
@@ -532,54 +517,89 @@ def run_training(local_rank: int, cfg: DictConfig):
             print(f"Confusion Matrix Offence:\n{m['cm_offence']}")
 
     # ---- Checkpointing -----------------------------------------------
+    
     save_dir = os.path.join(os.getcwd(), "checkpoints")
     print(f"[Rank {local_rank}] Saving checkpoints to {save_dir}...")
 
-    to_save = {"model": model, "optimizer": optimizer, "trainer": trainer}
+    # Unwrap the model for checkpointing to avoid DDP "module." prefix issues
+    # both in Checkpoint/Resume and in FastaiLRFinder's state restoration.
+    # Unwrap the model for checkpointing to avoid DDP "module." prefix issues.
+    raw_model = model.module if hasattr(model, "module") else model
+
+    # Wrapper to handle PEFT partial state dicts (frozen weights missing)
+    class PeftCheckpointModel:
+        def __init__(self, model):
+            self.model = model
+        def state_dict(self, *args, **kwargs):
+            return self.model.state_dict(*args, **kwargs)
+        def load_state_dict(self, state_dict, strict=True):
+            return self.model.load_state_dict(state_dict, strict=False)
+
+    to_save = {"model": PeftCheckpointModel(raw_model), "optimizer": optimizer, "trainer": trainer}
 
     best_handler = ModelCheckpoint(
         dirname=save_dir,
         filename_prefix="best",
-        score_name="val_bal_acc_action",
-        score_function=lambda engine: engine.state.metrics["bal_acc_action"],
+        score_name="Loss",
+        score_function=lambda engine: -engine.state.metrics["loss"],
         n_saved=1,
         create_dir=True,
         require_empty=False,
+        save_on_rank=0,
         global_step_transform=lambda *_: trainer.state.epoch,
     )
     evaluator.add_event_handler(Events.COMPLETED, best_handler, to_save)
-
-    last_handler = ModelCheckpoint(
-        dirname=save_dir,
-        filename_prefix="last",
-        require_empty=False,
-        n_saved=1,
-        create_dir=True,
-        global_step_transform=lambda *_: trainer.state.epoch,
-    )
-    trainer.add_event_handler(Events.EPOCH_COMPLETED, last_handler, to_save)
+    if tcfg.checkpoint.store:
+        last_handler = ModelCheckpoint(
+            dirname=save_dir,
+            filename_prefix="last",
+            require_empty=False,
+            n_saved=1,
+            create_dir=True,
+            save_on_rank=0,
+            global_step_transform=lambda *_: trainer.state.epoch,
+        )
+        trainer.add_event_handler(Events.EPOCH_COMPLETED(every=eval_every), last_handler, to_save)
 
     # ---- WandB -------------------------------------------------------
     _setup_wandb(tcfg, cfg, trainer, evaluator, train_evaluator, optimizer)
 
     # ---- Resume from checkpoint --------------------------------------
-    if tcfg.resume_checkpoint.enable and tcfg.resume_checkpoint.path:
-        resume_path = hydra.utils.to_absolute_path(tcfg.resume_checkpoint.path)
+    if tcfg.checkpoint.resume and tcfg.checkpoint.resume_from:
+        resume_path = hydra.utils.to_absolute_path(tcfg.checkpoint.resume_from)
         if os.path.exists(resume_path):
             print(f"[Rank {local_rank}] Loading checkpoint from {resume_path}...")
             checkpoint = torch.load(resume_path, map_location=device)
-            Checkpoint.load_objects(to_load=to_save, checkpoint=checkpoint)
-            print(f"[Rank {local_rank}] Checkpoint loaded. "
-                  f"Resuming from epoch {trainer.state.epoch}.")
+
+            if tcfg.checkpoint.only_weights:
+                # Load only model weights
+                print(f"[Rank {local_rank}] Loading ONLY model weights (ignoring optimizer/trainer state)...")
+                Checkpoint.load_objects(to_load={"model": to_save["model"]}, checkpoint=checkpoint)
+                print(f"[Rank {local_rank}] Weights loaded. Starting fresh training loop.")
+            else:
+                # Load everything (resume fully)
+                Checkpoint.load_objects(to_load=to_save, checkpoint=checkpoint)
+                print(f"[Rank {local_rank}] Checkpoint loaded. "
+                      f"Resuming from epoch {trainer.state.epoch}.")
         else:
             print(f"[Rank {local_rank}] Checkpoint path {resume_path} "
                   "not found! Starting from scratch.")
 
     # ---- Start training ----------------------------------------------
-    if idist.get_rank() == 0:
+    if idist.get_rank() == 0 and not tcfg.fastai_lr.enable:
         plot_lr_schedule_with_phases(tcfg, steps_per_epoch, save_dir=os.getcwd())
 
     print(f"[Rank {local_rank}] Starting trainer.run()...")
+    if tcfg.fastai_lr.enable:
+        lr_finder = FastaiLRFinder()
+        with lr_finder.attach(trainer, to_save, output_transform=lambda x:x["loss"], start_lr=1e-6, end_lr=1e-1) as trainer_with_finder:
+            trainer_with_finder.run(train_loader)
+        ax = lr_finder.plot()
+        ax.set_title("FastAI LR Finder")
+        fig_path = os.path.join(os.getcwd(), "lr_finder_plot.png")
+        ax.figure.savefig(fig_path)
+        print(lr_finder.lr_suggestion())
+
     trainer.run(train_loader, max_epochs=tcfg.epochs)
 
 

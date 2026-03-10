@@ -33,6 +33,8 @@ class CrossAttention(nn.Module):
 
         q = q.transpose(1, 2).reshape(B, n, C)
         return q
+
+
     
 class RoPEAttention(nn.Module):
     def __init__(

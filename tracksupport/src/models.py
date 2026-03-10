@@ -10,9 +10,10 @@ from tracker.basic_tracker import Tracker
 with warnings.catch_warnings():
     warnings.simplefilter("ignore", UserWarning)
     from torchvision.io.video import read_video
+from tracker.frame_selection import SimpleFrameSelector
 from transformers import AutoModel, AutoVideoProcessor
 from classification.attention_pooling import AttentivePooler
-from classification.mvfoulhead import EmbedMVAggregate
+from classification.mvfoulhead import get_head
 from peft import LoraConfig, get_peft_model
 from tracker.modules import TrackTention
 
@@ -38,7 +39,7 @@ class VJEPATracker(nn.Module):
         self.max_track_tokens = cfg.max_track_tokens
 
         self.aggregation = AttentivePooler(cfg.modules)
-        self.classifier = EmbedMVAggregate(agr_type=cfg.agr_type, feat_dim=cfg.embedding_dim, return_attention=cfg.return_attention)
+        self.classifier = get_head(model=cfg.classifier_model, agr_type=cfg.agr_type, feat_dim=cfg.embedding_dim, return_attention=cfg.return_attention)
 
         self._use_lora = hasattr(self.embedding, 'peft_config')
         self._phase = cfg.training.phase
@@ -155,7 +156,8 @@ class MAEFinder(nn.Module):
         self.num_frames = cfg.num_frames
 
 
-        self.classifier = EmbedMVAggregate(agr_type=cfg.agr_type, feat_dim=cfg.embedding_dim, return_attention=cfg.return_attention)
+
+        self.classifier = get_head(model=cfg.classifier_model, agr_type=cfg.agr_type, feat_dim=cfg.embedding_dim, return_attention=cfg.return_attention)
         self._phase = cfg.training.phase
 
     def _set_backbone_grad(self):
@@ -249,11 +251,7 @@ class MAETracker(nn.Module):
 
         # ---- classification head -------------------------------------
         self.aggregation = AttentivePooler(cfg.modules)
-        self.classifier = EmbedMVAggregate(
-            agr_type=cfg.agr_type,
-            feat_dim=cfg.embedding_dim,
-            return_attention=cfg.return_attention,
-        )
+        self.classifier = get_head(model=cfg.classifier_model, agr_type=cfg.agr_type, feat_dim=cfg.embedding_dim, return_attention=cfg.return_attention)
 
         self._phase = cfg.training.phase
         self._freeze_pretrained()
@@ -284,6 +282,12 @@ class MAETracker(nn.Module):
                     lora_params += p.numel()
             state = "TRAINABLE" if lora_trainable else "FROZEN"
             print(f"[MAETracker] LoRA adapters {state} ({lora_params:,} params)")
+        
+        freeze = (self._phase == "train")
+        for name, p in self.tracktention_blocks.named_parameters():
+            p.requires_grad = not freeze
+
+
 
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         frozen = sum(p.numel() for p in self.parameters() if not p.requires_grad)
@@ -350,11 +354,11 @@ class MAETracker(nn.Module):
                 hidden_states = hidden_states.view(
                     BV, self.t_tubes, self.hpatches, self.wpatches, self.embedding_dim
                 )
-                track_tokens, hidden_states = self.tracktention_blocks[str(i)](
+                track_tokens, intermediate_hidden = self.tracktention_blocks[str(i)](
                     track_tokens, tracks, hidden_states
                 )
-                # Flatten back to (BV, N, D) for next encoder layer
-                hidden_states = hidden_states.reshape(BV, -1, self.embedding_dim)
+                # Flatten back to (BV, N, D) for next encoder layer, add residual connection from before TrackTention
+                hidden_states = intermediate_hidden.reshape(BV, -1, self.embedding_dim) + hidden_states.reshape(BV, -1, self.embedding_dim)
 
         # Apply final layer norm if present
         if hasattr(encoder, "layernorm") and encoder.layernorm is not None:
@@ -419,10 +423,13 @@ class MViTClassifier(nn.Module):
         weights = torchvision.models.video.MViT_V2_S_Weights.DEFAULT
         self.preprocess = weights.transforms()
         self.num_frames = cfg.num_frames
+        if cfg.frame_selection.enable:
+            from tracker.frame_selection import SimpleFrameSelector
+            self.frame_selector = SimpleFrameSelector(num_frames=cfg.num_frames, num_queries=cfg.frame_selection.num_queries, num_probes=cfg.frame_selection.num_probes)
 
         self.model = torchvision.models.video.mvit_v2_s(weights=weights)
         self.model.head = nn.Identity()
-        self.classifier = EmbedMVAggregate(agr_type=cfg.agr_type, feat_dim=cfg.embedding_dim, return_attention=cfg.return_attention)
+        self.classifier = get_head(model=cfg.classifier_model, agr_type=cfg.agr_type, feat_dim=cfg.embedding_dim, return_attention=cfg.return_attention)
         self._phase = cfg.training.phase
 
         # Freeze/unfreeze backbone based on phase
@@ -479,6 +486,64 @@ class MViTClassifier(nn.Module):
         assert pred_offence_severity.shape[0] == b, f"Expected batch size {b} for pred_offence_severity, got {pred_offence_severity.shape[0]}"
         return pred_action, pred_offence_severity, None
 
+class MViTFinder(nn.Module):
+    def __init__(self, cfg: DictConfig):
+        super().__init__()
+        weights = torchvision.models.video.MViT_V2_S_Weights.DEFAULT
+        self.preprocess = weights.transforms()
+        self.model = torchvision.models.video.mvit_v2_s(weights=weights).requires_grad_(False)
+        self.model.head = nn.Identity()
+        self.classifier = get_head(model=cfg.classifier_model, agr_type=cfg.agr_type, feat_dim=cfg.embedding_dim, return_attention=cfg.return_attention)
+        self.selector = SimpleFrameSelector(num_frames=cfg.frame_selection.num_frames, num_queries=cfg.frame_selection.num_queries, num_probes=cfg.frame_selection.num_probes)
+        self._phase = cfg.training.phase
+
+        # Freeze/unfreeze backbone based on phase
+        self._set_backbone_grad()
+
+    def _set_backbone_grad(self):
+        """Freeze backbone in 'train' phase, unfreeze in 'pretrain' phase."""
+        freeze = (self._phase == "train")
+        for param in self.model.parameters():
+            param.requires_grad = not freeze
+        if freeze:
+            print(f"[MViTracker] Backbone FROZEN ({sum(1 for p in self.model.parameters()):,} params)")
+        else:
+            print(f"[MViTracker] Backbone UNFROZEN (all params trainable)")
+
+    @property
+    def phase(self):
+        return self._phase
+
+    @phase.setter
+    def phase(self, phase: str = "train"):
+        assert phase in ["pretrain", "train", "test"]
+        self._phase = phase
+        self._set_backbone_grad()
+
+    def train(self, mode: bool = True):
+        # Skip calling .train() on the Ultralytics RTDETR model,
+        # which overrides .train() to launch a training procedure.
+        self.training = mode
+        for name, module in self._modules.items():
+            if name == "model" and self.phase == "train":
+                continue
+            module.train(mode)
+        return self
+
+    def forward(self, x):
+        x, interp_scores = self.selector(x)  # (B, V, num_frames, C, H, W)
+        b, v, t, c, h, w = x.shape
+        x = x.reshape(b*v, t, c, h, w).contiguous().squeeze(0)  # (B*V, T, C, H, W)
+        x = self.preprocess(x)
+        if x.dim() == 4:
+            x = x.unsqueeze(0)
+        x = self.model(x)
+        x = x.view(b, v, -1)
+        pred_action, pred_offence_severity = self.classifier(x)
+        assert pred_action.shape[0] == b, f"Expected batch size {b} for pred_action, got {pred_action.shape[0]}"
+        assert pred_offence_severity.shape[0] == b, f"Expected batch size {b} for pred_offence_severity, got {pred_offence_severity.shape[0]}"
+        return pred_action, pred_offence_severity, interp_scores
+
 
 
 # ---------------------------------------------------------------------------
@@ -489,6 +554,7 @@ MODEL_REGISTRY: dict[str, type[nn.Module]] = {
     "mvit": MViTClassifier,
     "mae": MAEFinder,
     "mae_tracked": MAETracker,
+    "mvit_finder": MViTFinder,
 }
 
 

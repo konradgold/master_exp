@@ -4,6 +4,7 @@
 # Selected via: torchrun ... src/runs/train.py model=vjepa
 
 model_type: vjepa
+classifier_model: embed_mv_aggregate
 
 model_hf: facebook/vjepa2-vith-fpc64-256
 max_track_tokens: 10
