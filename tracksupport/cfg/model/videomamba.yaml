@@ -1,0 +1,28 @@
+# @package _global_
+#
+# VideoMamba-S model configuration (no tracker, no TrackTention).
+# Uses AttentivePooler for view aggregation + embed_mv_aggregate head.
+# Selected via: torchrun ... src/runs/train.py model=videomamba
+#
+# Pretrained K400 weights (small, 32 frames):
+#   https://huggingface.co/OpenGVLab/VideoMamba/blob/main/videomamba_s16_k400_f32_res224.pth
+
+model_type: videomamba
+classifier_model: embed_mv_aggregate
+
+# VideoMamba backbone parameters
+variant: small             # tiny (192d/24L) | small (384d/24L) | middle (576d/32L)
+embedding_dim: 384         # must match variant: tiny=192, small=384, middle=576
+num_frames: 32             # 32 or 64 recommended for VideoMamba-S K400
+img_size: 224
+patch_size: 16
+tubelet_size: 2            # temporal conv kernel size (frames per tubelet)
+drop_rate: 0.0
+drop_path_rate: 0.1
+use_checkpoint: false
+checkpoint_num: 0
+
+# Path to a pretrained .pth checkpoint (K400 fine-tuned).
+# Download from HuggingFace: https://huggingface.co/OpenGVLab/VideoMamba
+# Set to null to train from scratch.
+pretrained_ckpt: /sc/home/konrad.goldenbaum/models/videomamba_s16_k400_f32_res224.pth

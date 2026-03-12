@@ -8,7 +8,7 @@ wandb:
 data_path: /sc/home/konrad.goldenbaum/data/SoccerData/mvfouls
 
 epochs: 40
-train_batch_size: 4
+train_batch_size: 12
 val_batch_size: 1
 lr: 1e-3
 min_lr: 1e-5
@@ -33,7 +33,7 @@ use_weighted_sampler: true
 # Each entry: [start_epoch, phase, lr]
 # Phases: "train" = frozen backbone, "pretrain" = unfrozen backbone
 phase_schedule:
-  enable: true
+  enable: false
   transition_epochs: 5 # Epochs at which to transition phases
   schedule:
     - [1, "train", 1e-3, 12]       # Epochs 1-15: train head only
@@ -41,7 +41,7 @@ phase_schedule:
     - [36, "train", 1e-4, 12]      # Epochs 36+: freeze backbone again
 
 checkpoint:
-  resume: true
+  resume: false
   store: false
   only_weights: true
   resume_from: checkpoints/best_checkpoint_20_Action_BA=0.1458.pt

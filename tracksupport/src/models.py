@@ -546,6 +546,114 @@ class MViTFinder(nn.Module):
 
 
 
+class VideoMambaClassifier(nn.Module):
+    """VideoMamba backbone with AttentivePooler + classification head.
+
+    Uses the VisionMamba (bidirectional Mamba SSM) encoder from
+    OpenGVLab/VideoMamba.  Pretrained K400 weights can be loaded
+    from a local .pth checkpoint via ``cfg.pretrained_ckpt``.
+
+    Sizes:  tiny (192d/24L), small (384d/24L), middle (576d/32L).
+    """
+
+    # Map config name → (embed_dim, depth)
+    _VARIANTS = {
+        "tiny": (192, 24),
+        "small": (384, 24),
+        "middle": (576, 32),
+    }
+
+    def __init__(self, cfg: DictConfig):
+        super().__init__()
+        from backbones.videomamba import VisionMamba, load_state_dict as vm_load_state_dict
+
+        variant = cfg.get("variant", "small")
+        embed_dim, depth = self._VARIANTS[variant]
+
+        self.encoder = VisionMamba(
+            img_size=cfg.get("img_size", 224),
+            patch_size=cfg.get("patch_size", 16),
+            depth=depth,
+            embed_dim=embed_dim,
+            num_classes=0,  # discard original head
+            num_frames=cfg.num_frames,
+            kernel_size=cfg.get("tubelet_size", 2),
+            drop_rate=cfg.get("drop_rate", 0.0),
+            drop_path_rate=cfg.get("drop_path_rate", 0.1),
+            use_checkpoint=cfg.get("use_checkpoint", False),
+            checkpoint_num=cfg.get("checkpoint_num", 0),
+        )
+
+        # Load pretrained weights if path is provided
+        ckpt_path = cfg.get("pretrained_ckpt", None)
+        if ckpt_path:
+            print(f"[VideoMambaClassifier] Loading pretrained weights from {ckpt_path}")
+            state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+            if "model" in state_dict:
+                state_dict = state_dict["model"]
+            vm_load_state_dict(self.encoder, state_dict, center=True)
+
+        self.num_frames = cfg.num_frames
+        self.embedding_dim = embed_dim
+
+        self.aggregation = AttentivePooler(cfg.modules)
+        self.classifier = get_head(
+            model=cfg.classifier_model,
+            agr_type=cfg.agr_type,
+            feat_dim=cfg.embedding_dim,
+            return_attention=cfg.return_attention,
+        )
+        self._phase = cfg.training.phase
+        self._set_backbone_grad()
+
+    def _set_backbone_grad(self):
+        freeze = self._phase == "train"
+        for param in self.encoder.parameters():
+            param.requires_grad = not freeze
+        state = "FROZEN" if freeze else "UNFROZEN"
+        n = sum(1 for _ in self.encoder.parameters())
+        print(f"[VideoMambaClassifier] Backbone {state} ({n:,} params)")
+
+    @property
+    def phase(self):
+        return self._phase
+
+    @phase.setter
+    def phase(self, phase: str):
+        assert phase in ("pretrain", "train", "test")
+        self._phase = phase
+        self._set_backbone_grad()
+
+    def train(self, mode: bool = True):
+        self.training = mode
+        for name, module in self._modules.items():
+            if name == "encoder" and self._phase == "train":
+                continue
+            module.train(mode)
+        return self
+
+    def forward(self, x):
+        b, v, t, c, h, w = x.shape
+        x = x.view(b * v, t, c, h, w)
+
+        # VideoMamba expects (B, C, T, H, W)
+        x = x.permute(0, 2, 1, 3, 4).contiguous()
+
+        if self._phase == "train":
+            with torch.no_grad():
+                x = self.encoder.forward_features(x)  # (B*V, D)
+        else:
+            x = self.encoder.forward_features(x)  # (B*V, D)
+
+        # Aggregate across views with AttentivePooler
+        x = x.view(b, v, -1)  # (B, V, D)
+        x = self.aggregation(x)  # (B, num_queries, D)
+        pred_action, pred_offence_severity = self.classifier(x)
+        assert pred_action.shape[0] == b
+        assert pred_offence_severity.shape[0] == b
+        return pred_action, pred_offence_severity, None
+
+
 # ---------------------------------------------------------------------------
 # Model registry
 # ---------------------------------------------------------------------------
@@ -555,6 +663,7 @@ MODEL_REGISTRY: dict[str, type[nn.Module]] = {
     "mae": MAEFinder,
     "mae_tracked": MAETracker,
     "mvit_finder": MViTFinder,
+    "videomamba": VideoMambaClassifier,
 }
 
 

@@ -4,7 +4,7 @@
 # Selected via: torchrun ... src/runs/train.py model=mvit
 
 model_type: mvit_finder
-classifier_model: shallow_mv_aggregate
+classifier_model: embed_mv_aggregate # shallow_mv_aggregate
 
 embedding_dim: 768
 num_frames: 100

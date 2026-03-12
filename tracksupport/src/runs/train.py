@@ -218,9 +218,14 @@ def _setup_lr_manager(trainer, optimizer, tcfg, steps_per_epoch, total_steps,
         tr_epochs = phase_schedule.get('transition_epochs', 1)
         curr_steps = len(train_loader)
         
-        # IMPORTANT: Update engine.state.epoch_length so ProgressBar and other handlers see the new length
+        # Update epoch_length to reflect the new batch size.
+        # Also rebase state.iteration so that Ignite's epoch computation
+        # (epoch = iteration // epoch_length) stays consistent – without
+        # this, changing epoch_length mid-run shifts the perceived epoch
+        # count and causes premature termination.
         engine.state.epoch_length = curr_steps
-        
+        engine.state.iteration = (engine.state.epoch - 1) * curr_steps
+
         _trans.update(active=True, start_lr=current_lr,
                       end_lr=new_lr, elapsed=0,
                       steps=max(1, int(tr_epochs * curr_steps)))
