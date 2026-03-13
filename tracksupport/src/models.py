@@ -2,6 +2,7 @@ import hydra
 from omegaconf import DictConfig
 from torch import nn
 import torch
+import torch.nn.functional as F
 import warnings
 
 import torchvision
@@ -596,58 +597,58 @@ class VideoMambaClassifier(nn.Module):
         self.num_frames = cfg.num_frames
         self.embedding_dim = embed_dim
 
-        self.aggregation = AttentivePooler(cfg.modules)
         self.classifier = get_head(
             model=cfg.classifier_model,
             agr_type=cfg.agr_type,
-            feat_dim=cfg.embedding_dim,
+            feat_dim=embed_dim,
             return_attention=cfg.return_attention,
         )
-        self._phase = cfg.training.phase
-        self._set_backbone_grad()
 
-    def _set_backbone_grad(self):
-        freeze = self._phase == "train"
-        for param in self.encoder.parameters():
-            param.requires_grad = not freeze
-        state = "FROZEN" if freeze else "UNFROZEN"
-        n = sum(1 for _ in self.encoder.parameters())
-        print(f"[VideoMambaClassifier] Backbone {state} ({n:,} params)")
 
-    @property
-    def phase(self):
-        return self._phase
+    def _preprocess_videos(self, x: torch.Tensor) -> torch.Tensor:
+        """Match input clip geometry to VideoMamba pretraining assumptions.
 
-    @phase.setter
-    def phase(self, phase: str):
-        assert phase in ("pretrain", "train", "test")
-        self._phase = phase
-        self._set_backbone_grad()
+        - Convert to float in [0, 1]
+        - Uniformly subsample/pad to ``self.num_frames``
+        - Resize spatially to encoder ``img_size``
+        """
+        bv, t, c, h, w = x.shape
 
-    def train(self, mode: bool = True):
-        self.training = mode
-        for name, module in self._modules.items():
-            if name == "encoder" and self._phase == "train":
-                continue
-            module.train(mode)
-        return self
+        if not torch.is_floating_point(x):
+            x = x.float().div_(255.0)
+        else:
+            x = x.float()
+
+        if t != self.num_frames:
+            idx = torch.linspace(
+                0,
+                max(t - 1, 0),
+                steps=self.num_frames,
+                device=x.device,
+            ).round().long()
+            x = x.index_select(1, idx)
+            t = self.num_frames
+
+        target_h, target_w = self.encoder.patch_embed.img_size
+        if (h, w) != (target_h, target_w):
+            x = x.view(bv * t, c, h, w)
+            x = F.interpolate(x, size=(target_h, target_w), mode="bilinear", align_corners=False)
+            x = x.view(bv, t, c, target_h, target_w)
+
+        return x.contiguous()
 
     def forward(self, x):
         b, v, t, c, h, w = x.shape
         x = x.view(b * v, t, c, h, w)
+        x = self._preprocess_videos(x)
 
         # VideoMamba expects (B, C, T, H, W)
         x = x.permute(0, 2, 1, 3, 4).contiguous()
-
-        if self._phase == "train":
-            with torch.no_grad():
-                x = self.encoder.forward_features(x)  # (B*V, D)
-        else:
-            x = self.encoder.forward_features(x)  # (B*V, D)
+        
+        x = self.encoder.forward_features(x)  # (B*V, D)
 
         # Aggregate across views with AttentivePooler
-        x = x.view(b, v, -1)  # (B, V, D)
-        x = self.aggregation(x)  # (B, num_queries, D)
+        x = x.view(b, v, -1)  # (B, V, D) # (B, num_queries, D)
         pred_action, pred_offence_severity = self.classifier(x)
         assert pred_action.shape[0] == b
         assert pred_offence_severity.shape[0] == b

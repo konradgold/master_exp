@@ -1,8 +1,6 @@
-embedding_dim: 768  # Will be auto-detected from embeddings
 mlp_ratio: 3.0
 num_heads: 2
 dropout: 0.3
-grid_size: 14
 proj_drop: 0.3
 attn_drop: 0.3
 num_layers: 2

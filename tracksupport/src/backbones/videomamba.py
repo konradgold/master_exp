@@ -18,7 +18,27 @@ from timm.models.vision_transformer import _load_weights
 
 import math
 
+import mamba_ssm.modules.mamba_simple as _mamba_simple_mod
 from mamba_ssm.modules.mamba_simple import Mamba
+
+try:
+    import causal_conv1d_cuda as _causal_conv1d_cuda  # type: ignore
+    _HAS_CAUSAL_CONV1D_CUDA = hasattr(_causal_conv1d_cuda, "causal_conv1d_fwd")
+except Exception:
+    _HAS_CAUSAL_CONV1D_CUDA = False
+
+if not _HAS_CAUSAL_CONV1D_CUDA:
+    try:
+        from causal_conv1d.causal_conv1d_interface import (
+            causal_conv1d_ref as _causal_conv1d_ref,
+            causal_conv1d_update_ref as _causal_conv1d_update_ref,
+        )
+
+        _mamba_simple_mod.causal_conv1d_fn = _causal_conv1d_ref
+        _mamba_simple_mod.causal_conv1d_update = _causal_conv1d_update_ref
+    except Exception:
+        # Keep upstream fallback behavior if causal-conv1d isn't importable.
+        pass
 
 try:
     from mamba_ssm.ops.triton.layernorm import RMSNorm, layer_norm_fn, rms_norm_fn
@@ -32,6 +52,8 @@ _MODELS = {
     "videomamba_s16_in1k": os.path.join(MODEL_PATH, "videomamba_s16_in1k_res224.pth"),
     "videomamba_m16_in1k": os.path.join(MODEL_PATH, "videomamba_m16_in1k_res224.pth"),
 }
+
+_REPORTED_CAUSAL_CONV_FALLBACK = False
 
 
 class Block(nn.Module):
@@ -103,19 +125,30 @@ def create_block(
     ssm_cfg=None,
     norm_epsilon=1e-5,
     drop_path=0.,
-    rms_norm=True,
+    rms_norm=False,
     residual_in_fp32=True,
-    fused_add_norm=True,
+    fused_add_norm=False,
     layer_idx=None,
-    bimamba=True,
+    bimamba=False,
     device=None,
     dtype=None,
 ):
     factory_kwargs = {"device": device, "dtype": dtype}
     if ssm_cfg is None:
         ssm_cfg = {}
-    mixer_cls = partial(Mamba, layer_idx=layer_idx, bimamba=bimamba, **ssm_cfg, **factory_kwargs)
-    norm_cls = partial(nn.LayerNorm if not rms_norm else RMSNorm, eps=norm_epsilon)
+    else:
+        ssm_cfg = dict(ssm_cfg)
+
+    # Force non-fast path when causal-conv1d CUDA extension is unavailable.
+    if not _HAS_CAUSAL_CONV1D_CUDA:
+        global _REPORTED_CAUSAL_CONV_FALLBACK
+        if ssm_cfg.get("use_fast_path", True) and not _REPORTED_CAUSAL_CONV_FALLBACK:
+            print("[VideoMamba] causal_conv1d_cuda not found; forcing use_fast_path=False")
+            _REPORTED_CAUSAL_CONV_FALLBACK = True
+        ssm_cfg["use_fast_path"] = False
+    mixer_cls = partial(Mamba, layer_idx=layer_idx, **ssm_cfg, **factory_kwargs)
+    use_rms = rms_norm and (RMSNorm is not None)
+    norm_cls = partial(nn.LayerNorm if not use_rms else RMSNorm, eps=norm_epsilon)
     block = Block(
         d_model,
         mixer_cls,
@@ -209,10 +242,10 @@ class VisionMamba(nn.Module):
             ssm_cfg=None, 
             norm_epsilon=1e-5, 
             initializer_cfg=None,
-            fused_add_norm=True,
-            rms_norm=True, 
+            fused_add_norm=False,
+            rms_norm=False, 
             residual_in_fp32=True,
-            bimamba=True,
+            bimamba=False,
             # video
             kernel_size=1, 
             num_frames=8, 
@@ -368,34 +401,105 @@ class VisionMamba(nn.Module):
         return x
 
 
-def inflate_weight(weight_2d, time_dim, center=True):
+def inflate_weight(weight, time_dim, center=True):
     print(f'Init center: {center}')
-    if center:
-        weight_3d = torch.zeros(*weight_2d.shape)
-        weight_3d = weight_3d.unsqueeze(2).repeat(1, 1, time_dim, 1, 1)
-        middle_idx = time_dim // 2
-        weight_3d[:, :, middle_idx, :, :] = weight_2d
-    else:
-        weight_3d = weight_2d.unsqueeze(2).repeat(1, 1, time_dim, 1, 1)
-        weight_3d = weight_3d / time_dim
-    return weight_3d
+    if weight.ndim == 4:
+        # Inflate 2D conv kernels (O, I, H, W) -> (O, I, T, H, W).
+        if center:
+            weight_3d = weight.new_zeros(
+                weight.shape[0], weight.shape[1], time_dim, weight.shape[2], weight.shape[3]
+            )
+            middle_idx = time_dim // 2
+            weight_3d[:, :, middle_idx, :, :] = weight
+        else:
+            weight_3d = weight.unsqueeze(2).repeat(1, 1, time_dim, 1, 1)
+            weight_3d = weight_3d / time_dim
+        return weight_3d
+
+    if weight.ndim == 5:
+        # Adapt 3D conv kernels if checkpoint temporal size differs.
+        src_t = weight.shape[2]
+        if src_t == time_dim:
+            return weight
+        if src_t > time_dim:
+            start = (src_t - time_dim) // 2
+            return weight[:, :, start:start + time_dim, :, :]
+
+        weight_3d = weight.new_zeros(
+            weight.shape[0], weight.shape[1], time_dim, weight.shape[3], weight.shape[4]
+        )
+        if center:
+            start = (time_dim - src_t) // 2
+            weight_3d[:, :, start:start + src_t, :, :] = weight
+        else:
+            weight_3d = weight.mean(dim=2, keepdim=True).repeat(1, 1, time_dim, 1, 1)
+        return weight_3d
+
+    raise ValueError(f"Unsupported kernel rank for inflate_weight: {weight.ndim}")
 
 
 def load_state_dict(model, state_dict, center=True):
+    # Filter known incompatible keys from bidirectional checkpoints.
+    # Current model uses unidirectional Mamba blocks, so these are expected extras.
+    bidir_suffixes = (
+        "A_b_log",
+        "D_b",
+        "conv1d_b.weight",
+        "conv1d_b.bias",
+        "x_proj_b.weight",
+        "dt_proj_b.weight",
+        "dt_proj_b.bias",
+    )
+    for k in list(state_dict.keys()):
+        if k.startswith("layers.") and ".mixer." in k and any(k.endswith(s) for s in bidir_suffixes):
+            state_dict.pop(k)
+
     state_dict_3d = model.state_dict()
-    for k in state_dict.keys():
+    for k in list(state_dict.keys()):
         if k in state_dict_3d.keys() and state_dict[k].shape != state_dict_3d[k].shape:
             if len(state_dict_3d[k].shape) <= 3:
-                print(f'Ignore: {k}')
+                # Resize compatible temporal embeddings, otherwise drop key.
+                src = state_dict[k]
+                dst = state_dict_3d[k]
+                if src.ndim == 3 and dst.ndim == 3 and src.shape[0] == dst.shape[0] and src.shape[2] == dst.shape[2]:
+                    print(f'Resize: {k}, {src.shape} => {dst.shape}')
+                    resized = torch.nn.functional.interpolate(
+                        src.permute(0, 2, 1),
+                        size=dst.shape[1],
+                        mode='linear',
+                        align_corners=False,
+                    ).permute(0, 2, 1)
+                    state_dict[k] = resized.to(dtype=dst.dtype)
+                else:
+                    print(f'Ignore: {k}')
+                    state_dict.pop(k)
                 continue
             print(f'Inflate: {k}, {state_dict[k].shape} => {state_dict_3d[k].shape}')
             time_dim = state_dict_3d[k].shape[2]
             state_dict[k] = inflate_weight(state_dict[k], time_dim, center=center)
     
-    del state_dict['head.weight']
-    del state_dict['head.bias']
+    state_dict.pop('head.weight', None)
+    state_dict.pop('head.bias', None)
     msg = model.load_state_dict(state_dict, strict=False)
-    print(msg)
+
+    # In some environments RMSNorm may be unavailable and LayerNorm is used.
+    # Missing norm.bias keys are then expected because upstream checkpoints
+    # were often created without those parameters.
+    expected_missing_suffixes = (".norm.bias", "norm_f.bias")
+    real_missing = [k for k in msg.missing_keys if not k.endswith(expected_missing_suffixes)]
+    real_unexpected = list(msg.unexpected_keys)
+
+    if real_missing or real_unexpected:
+        print("[VideoMamba] Checkpoint load has non-trivial key mismatches")
+        if real_missing:
+            print(f"  missing ({len(real_missing)}): {real_missing[:8]}")
+        if real_unexpected:
+            print(f"  unexpected ({len(real_unexpected)}): {real_unexpected[:8]}")
+    else:
+        print(
+            "[VideoMamba] Checkpoint loaded with only expected mismatches "
+            f"(missing={len(msg.missing_keys)}, unexpected={len(msg.unexpected_keys)})"
+        )
 
 
 @register_model
@@ -406,7 +510,7 @@ def videomamba_tiny(pretrained=False, **kwargs):
         depth=24, 
         rms_norm=True, 
         residual_in_fp32=True, 
-        fused_add_norm=True, 
+        fused_add_norm=False, 
         **kwargs
     )
     model.default_cfg = _cfg()
@@ -425,7 +529,7 @@ def videomamba_small(pretrained=False, **kwargs):
         depth=24, 
         rms_norm=True, 
         residual_in_fp32=True, 
-        fused_add_norm=True, 
+        fused_add_norm=False, 
         **kwargs
     )
     model.default_cfg = _cfg()
@@ -444,7 +548,7 @@ def videomamba_middle(pretrained=False, **kwargs):
         depth=32, 
         rms_norm=True, 
         residual_in_fp32=True, 
-        fused_add_norm=True, 
+        fused_add_norm=False, 
         **kwargs
     )
     model.default_cfg = _cfg()

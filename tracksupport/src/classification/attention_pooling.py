@@ -19,10 +19,12 @@ class AttentivePooler(nn.Module):
     def __init__(
         self,
         cfg: DictConfig,
+        embed_dim: int = 768,
+        grid_size: int = 14,
     ):
         super().__init__()
         num_queries=cfg.num_queries
-        embed_dim=cfg.embedding_dim
+        embed_dim=embed_dim
         num_heads=cfg.num_heads
         mlp_ratio=cfg.mlp_ratio
         depth=cfg.depth
@@ -34,7 +36,7 @@ class AttentivePooler(nn.Module):
         attn_drop=cfg.attn_drop
         proj_drop=cfg.proj_drop
         attention_mechanism=cfg.att_pos
-        grid_size=cfg.grid_size
+        grid_size=grid_size
         self.use_activation_checkpointing = use_activation_checkpointing
         self.query_tokens = nn.Parameter(torch.zeros(1, num_queries, embed_dim))
 

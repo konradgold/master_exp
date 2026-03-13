@@ -62,6 +62,10 @@ def _train_step_fn(model, optimizer, criterion_action, criterion_offence,
         labels_offence, labels_action, videos, _ = batch
 
         videos = videos.to(device, non_blocking=True)
+        if not torch.is_floating_point(videos):
+            videos = videos.float().div_(255.0)
+        else:
+            videos = videos.float()
         labels_action = labels_action.to(device, non_blocking=True).squeeze(1)
         labels_offence = labels_offence.to(device, non_blocking=True).squeeze(1)
 
@@ -107,6 +111,10 @@ def _val_step_fn(model, criterion_action, criterion_offence, device):
             labels_offence, labels_action, videos, _ = batch
 
             videos = videos.to(device, non_blocking=True)
+            if not torch.is_floating_point(videos):
+                videos = videos.float().div_(255.0)
+            else:
+                videos = videos.float()
             labels_action = labels_action.to(device, non_blocking=True).squeeze(1)
             labels_offence = labels_offence.to(device, non_blocking=True).squeeze(1)
 
@@ -177,6 +185,16 @@ def _setup_lr_manager(trainer, optimizer, tcfg, steps_per_epoch, total_steps,
     }
     _epoch_state = {"step": 0}
 
+    def _pg_scale(pg):
+        return float(pg.get("lr_scale", 1.0))
+
+    def _base_lr_from_optimizer():
+        for pg in optimizer.param_groups:
+            scale = _pg_scale(pg)
+            if scale != 0.0:
+                return float(pg["lr"]) / scale
+        return float(optimizer.param_groups[0]["lr"])
+
     def _cosine_lr(anchor, elapsed, t_max):
         return min_lr + 0.5 * (anchor - min_lr) * (
             1.0 + math.cos(math.pi * min(elapsed, t_max) / t_max)
@@ -212,7 +230,7 @@ def _setup_lr_manager(trainer, optimizer, tcfg, steps_per_epoch, total_steps,
             else:
                 bs_msg = f" | WARNING: Could not set batch size to {target_bs}, loader missing batch_sampler.batch_size"
 
-        current_lr = optimizer.param_groups[0]["lr"]
+        current_lr = _base_lr_from_optimizer()
         
         # Recalculate transition steps based on current steps per epoch
         tr_epochs = phase_schedule.get('transition_epochs', 1)
@@ -284,7 +302,7 @@ def _setup_lr_manager(trainer, optimizer, tcfg, steps_per_epoch, total_steps,
             _cos["elapsed"] += 1
 
         for pg in optimizer.param_groups:
-            pg["lr"] = lr
+            pg["lr"] = lr * _pg_scale(pg)
         
         _epoch_state["step"] += 1
 
@@ -432,9 +450,48 @@ def run_training(local_rank: int, cfg: DictConfig):
     # ---- Optimizer & Loss --------------------------------------------
     # Include ALL params so optimizer state survives phase transitions.
     print(f"[Rank {local_rank}] Setting up optimizer...")
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=tcfg.lr, weight_decay=tcfg.weight_decay,
-    )
+    raw_model = model.module if hasattr(model, "module") else model
+    backbone_factor = float(tcfg.get("backbone_lr_factor", 1.0))
+    backbone_wd_factor = float(tcfg.get("backbone_weight_decay_factor", 1.0))
+
+    if (
+        cfg.model_type == "videomamba"
+        and hasattr(raw_model, "encoder")
+        and (backbone_factor != 1.0 or backbone_wd_factor != 1.0)
+    ):
+        encoder_params = list(raw_model.encoder.parameters())
+        encoder_ids = {id(p) for p in encoder_params}
+        other_params = [p for p in raw_model.parameters() if id(p) not in encoder_ids]
+
+        optimizer = torch.optim.AdamW(
+            [
+                {
+                    "params": other_params,
+                    "lr": float(tcfg.lr),
+                    "lr_scale": 1.0,
+                    "weight_decay": float(tcfg.weight_decay),
+                },
+                {
+                    "params": encoder_params,
+                    "lr": float(tcfg.lr) * backbone_factor,
+                    "lr_scale": backbone_factor,
+                    "weight_decay": float(tcfg.weight_decay) * backbone_wd_factor,
+                },
+            ],
+            weight_decay=tcfg.weight_decay,
+        )
+        print(
+            f"[Rank {local_rank}] VideoMamba backbone LR factor={backbone_factor:.4f} "
+            f"(base={float(tcfg.lr):.2e}, backbone={float(tcfg.lr) * backbone_factor:.2e})"
+        )
+        print(
+            f"[Rank {local_rank}] Backbone WD factor={backbone_wd_factor:.4f} "
+            f"(base={float(tcfg.weight_decay):.2e}, backbone={float(tcfg.weight_decay) * backbone_wd_factor:.2e})"
+        )
+    else:
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=tcfg.lr, weight_decay=tcfg.weight_decay,
+        )
     optimizer = idist.auto_optim(optimizer)
     print(f"[Rank {local_rank}] Optimizer wrapped.")
 

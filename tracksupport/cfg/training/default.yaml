@@ -2,13 +2,13 @@ wandb:
   enable: true
   project: "Thesis-Goldenbaum"
   entity: "konradgoldenbaum-hasso-plattner-institut"
-  run_name: weighted_mvit_finder
+  run_name: weighted_mamba_finder
   log_frequency: 10  # log every N iterations
 
 data_path: /sc/home/konrad.goldenbaum/data/SoccerData/mvfouls
 
 epochs: 40
-train_batch_size: 12
+train_batch_size: 4
 val_batch_size: 1
 lr: 1e-3
 min_lr: 1e-5
@@ -17,6 +17,8 @@ fastai_lr:
   enable: false
 warmup_epochs: 15
 weight_decay: 0.01
+backbone_lr_factor: 1.0  # effective backbone LR = lr * factor
+backbone_weight_decay_factor: 1.0  # effective backbone WD = weight_decay * factor
 num_views: 2
 start_frame: 0.0
 end_frame: 125.0
